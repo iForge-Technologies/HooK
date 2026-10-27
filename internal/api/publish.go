@@ -80,6 +80,24 @@ func (s *Server) saveMaintenance(w http.ResponseWriter, r *http.Request, se *ses
 	if m.HostIDs == nil {
 		m.HostIDs = []int64{}
 	}
+	// Only existing monitors and servers: an ID kept for later would cover
+	// whatever is created with it.
+	ms, err := s.store.Monitors()
+	if err != nil {
+		s.internal(w, err)
+		return
+	}
+	hs, err := s.store.Hosts()
+	if err != nil {
+		s.internal(w, err)
+		return
+	}
+	m.MonitorIDs = slices.DeleteFunc(m.MonitorIDs, func(id int64) bool {
+		return !slices.ContainsFunc(ms, func(x *store.Monitor) bool { return x.ID == id })
+	})
+	m.HostIDs = slices.DeleteFunc(m.HostIDs, func(id int64) bool {
+		return !slices.ContainsFunc(hs, func(x *store.Host) bool { return x.ID == id })
+	})
 	if !m.Everything && len(m.MonitorIDs) == 0 && len(m.HostIDs) == 0 {
 		writeErr(w, http.StatusBadRequest, "choose what the window covers")
 		return
@@ -357,7 +375,11 @@ func (s *Server) publicStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	body, _ := json.Marshal(out)
+	body, err := json.Marshal(out)
+	if err != nil {
+		s.internal(w, err)
+		return
+	}
 	publicCache.Lock()
 	publicCache.m[slug] = cachedPage{at: now, body: body}
 	publicCache.Unlock()

@@ -67,8 +67,20 @@ func checkHTTP(ctx context.Context, s Spec) Result {
 		}
 	}
 
+	// The hub may check private targets the admin chose, but when the target
+	// is public, neither its redirects nor later DNS answers may take the hub
+	// onto its own network. (Not through a proxy, which resolves names itself.)
+	proxy := http.ProxyFromEnvironment
+	pinned := false
+	if !s.publicOnly {
+		if p, _ := proxy(req); p == nil && targetIsPublic(ctx, req.URL.Hostname()) {
+			s.publicOnly, pinned = true, true
+		}
+	} else {
+		proxy = nil // an agent's proxy would sidestep the connect-time guard
+	}
 	transport := &http.Transport{
-		Proxy:             http.ProxyFromEnvironment,
+		Proxy:             proxy,
 		DialContext:       s.dialer().DialContext,
 		TLSClientConfig:   &tls.Config{InsecureSkipVerify: c.IgnoreTLS},
 		DisableKeepAlives: true, // every check measures a fresh connection
@@ -91,6 +103,9 @@ func checkHTTP(ctx context.Context, s Spec) Result {
 	start := time.Now()
 	resp, err := client.Do(req)
 	if err != nil {
+		if pinned && errors.Is(err, errPrivate) {
+			return Result{Latency: time.Since(start), Msg: "Blocked: redirected to a private address"}
+		}
 		return Result{Latency: time.Since(start), Msg: ErrMsg(err)}
 	}
 	defer resp.Body.Close()

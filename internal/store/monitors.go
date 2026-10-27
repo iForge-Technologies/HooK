@@ -163,14 +163,17 @@ func (s *Store) CreateMonitor(m *Monitor) error {
 	}
 	defer tx.Rollback()
 	now := nowMs()
-	res, err := tx.Exec(`INSERT INTO monitors(name, type, target, interval_s, retry_interval_s, timeout_s, retries, degraded_ms, grp, active, config, created_at, updated_at, status, status_since)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		m.Name, m.Type, m.Target, m.Interval, m.RetryInterval, m.Timeout, m.Retries, m.DegradedMs, m.Group, boolInt(m.Active), s.sealConfig(m.Config), now, now,
-		initialStatus(m.Active), now)
+	id, err := nextID(tx, "monitors")
 	if err != nil {
 		return err
 	}
-	m.ID, _ = res.LastInsertId()
+	if _, err := tx.Exec(`INSERT INTO monitors(id, name, type, target, interval_s, retry_interval_s, timeout_s, retries, degraded_ms, grp, active, config, created_at, updated_at, status, status_since)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		id, m.Name, m.Type, m.Target, m.Interval, m.RetryInterval, m.Timeout, m.Retries, m.DegradedMs, m.Group, boolInt(m.Active), s.sealConfig(m.Config), now, now,
+		initialStatus(m.Active), now); err != nil {
+		return err
+	}
+	m.ID = id
 	if err := setChannels(tx, m.ID, m.ChannelIDs); err != nil {
 		return err
 	}
@@ -200,6 +203,17 @@ func (s *Store) UpdateMonitor(m *Monitor, resetState bool) error {
 		return err
 	}
 	return tx.Commit()
+}
+
+// nextID hands out the next ID for monitors or hosts. IDs are never reused:
+// SQLite would otherwise give a deleted row's ID to the next insert.
+func nextID(tx *sql.Tx, table string) (int64, error) {
+	if table != "monitors" && table != "hosts" {
+		return 0, errors.New("nextID: unknown table " + table)
+	}
+	var id int64
+	err := tx.QueryRow(`UPDATE id_seq SET last = max(last, (SELECT coalesce(max(id), 0) FROM `+table+`)) + 1 WHERE name = ? RETURNING last`, table).Scan(&id)
+	return id, err
 }
 
 func setChannels(tx *sql.Tx, monitorID int64, ids []int64) error {

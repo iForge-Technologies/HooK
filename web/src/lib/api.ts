@@ -237,6 +237,8 @@ export interface Server {
   info: HostInfo;
   thresholds: Thresholds;
   channelIds: number[];
+  /** The admin lets this server confirm other monitors' failures. */
+  probeLocation: boolean;
   status: ServerStatus;
   statusSince: number;
   lastSeen: number;

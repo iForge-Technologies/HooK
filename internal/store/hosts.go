@@ -43,14 +43,17 @@ type Host struct {
 	LastSeen    int64          `json:"lastSeen"`
 	RemoteIP    string         `json:"remoteIp"`
 	CreatedAt   int64          `json:"createdAt"`
+	// ProbeLocation is the admin's choice to use this server for confirmation
+	// probes. The agent's own Info.Probes only says it is able to.
+	ProbeLocation bool `json:"probeLocation"`
 }
 
-const hostCols = `id, name, grp, info, thresholds, status, status_since, last_seen, remote_ip, created_at`
+const hostCols = `id, name, grp, info, thresholds, status, status_since, last_seen, remote_ip, created_at, probe_location`
 
 func scanHost(r scanner) (*Host, error) {
 	var h Host
 	var info, th string
-	err := r.Scan(&h.ID, &h.Name, &h.Group, &info, &th, &h.Status, &h.StatusSince, &h.LastSeen, &h.RemoteIP, &h.CreatedAt)
+	err := r.Scan(&h.ID, &h.Name, &h.Group, &info, &th, &h.Status, &h.StatusSince, &h.LastSeen, &h.RemoteIP, &h.CreatedAt, &h.ProbeLocation)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -137,12 +140,15 @@ func (s *Store) CreateHost(h *Host, token string) error {
 	}
 	defer tx.Rollback()
 	now := nowMs()
-	res, err := tx.Exec(`INSERT INTO hosts(name, grp, token_hash, thresholds, status, status_since, created_at) VALUES(?,?,?,?, 'new', ?, ?)`,
-		h.Name, h.Group, hashToken(token), string(th), now, now)
+	id, err := nextID(tx, "hosts")
 	if err != nil {
 		return err
 	}
-	h.ID, _ = res.LastInsertId()
+	if _, err := tx.Exec(`INSERT INTO hosts(id, name, grp, token_hash, thresholds, status, status_since, created_at, probe_location) VALUES(?,?,?,?,?, 'new', ?, ?, ?)`,
+		id, h.Name, h.Group, hashToken(token), string(th), now, now, boolInt(h.ProbeLocation)); err != nil {
+		return err
+	}
+	h.ID = id
 	h.Status, h.StatusSince, h.CreatedAt = "new", now, now
 	if err := setHostChannels(tx, h.ID, h.ChannelIDs); err != nil {
 		return err
@@ -157,7 +163,7 @@ func (s *Store) UpdateHost(h *Host) error {
 		return err
 	}
 	defer tx.Rollback()
-	res, err := tx.Exec(`UPDATE hosts SET name = ?, grp = ?, thresholds = ? WHERE id = ?`, h.Name, h.Group, string(th), h.ID)
+	res, err := tx.Exec(`UPDATE hosts SET name = ?, grp = ?, thresholds = ?, probe_location = ? WHERE id = ?`, h.Name, h.Group, string(th), boolInt(h.ProbeLocation), h.ID)
 	if err != nil {
 		return err
 	}
@@ -342,7 +348,12 @@ type MetricPoint struct {
 	GPUMax       *float64 `json:"gpuMax,omitempty"`
 }
 
-// HostSeries reads points since sinceMs from "raw", "1m" or "1h".
+// maxSeriesPoints caps one chart read. The hub stores at most one raw frame per
+// host per second, so normal ranges stay well under it.
+const maxSeriesPoints = 10_000
+
+// HostSeries reads points since sinceMs from "raw", "1m" or "1h", newest
+// maxSeriesPoints at most, oldest first.
 func (s *Store) HostSeries(hostID, sinceMs int64, resolution string) ([]MetricPoint, error) {
 	table, rollup := "host_metrics", false
 	switch resolution {
@@ -355,7 +366,8 @@ func (s *Store) HostSeries(hostID, sinceMs int64, resolution string) ([]MetricPo
 	if rollup {
 		cols += ", " + strings.Join(suffix(maxCols, "_max"), ", ")
 	}
-	rows, err := s.db.Query(`SELECT `+cols+` FROM `+table+` WHERE host_id = ? AND ts >= ? ORDER BY ts`, hostID, sinceMs)
+	rows, err := s.db.Query(`SELECT * FROM (SELECT `+cols+` FROM `+table+` WHERE host_id = ? AND ts >= ? ORDER BY ts DESC LIMIT ?) ORDER BY ts`,
+		hostID, sinceMs, maxSeriesPoints)
 	if err != nil {
 		return nil, err
 	}
@@ -397,7 +409,9 @@ func (s *Store) LatestMetrics() (map[int64]proto.Metrics, error) {
 	return out, rows.Err()
 }
 
-func (s *Store) PruneHosts(rawBefore, minuteBefore, hourBefore int64) error {
+// PruneHosts enforces retention. Resolved server events go after eventsBefore,
+// so events an agent opens and lets resolve can't pile up forever.
+func (s *Store) PruneHosts(rawBefore, minuteBefore, hourBefore, eventsBefore int64) error {
 	for _, q := range []struct {
 		sql string
 		ts  int64
@@ -407,6 +421,7 @@ func (s *Store) PruneHosts(rawBefore, minuteBefore, hourBefore int64) error {
 		{`DELETE FROM host_rollup_1h WHERE ts < ?`, hourBefore},
 		{`DELETE FROM host_traffic WHERE day < ?`, hourBefore},
 		{`DELETE FROM speed_tests WHERE ts < ?`, hourBefore},
+		{`DELETE FROM host_events WHERE resolved_at IS NOT NULL AND resolved_at < ?`, eventsBefore},
 	} {
 		if _, err := s.db.Exec(q.sql, q.ts); err != nil {
 			return err

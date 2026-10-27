@@ -32,6 +32,12 @@ func (s *Server) push(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "msg": "unknown push token"})
 		return
 	}
+	// A job reports once per run; a token used much faster than that is being
+	// abused to flood alerts and incident history.
+	if !s.pushLimit.Take(strconv.FormatInt(m.ID, 10)) {
+		writeJSON(w, http.StatusTooManyRequests, map[string]any{"ok": false, "msg": "too many pushes; at most one every 10 seconds"})
+		return
+	}
 	q := r.URL.Query()
 	status := strings.ToLower(q.Get("status"))
 	res := checks.Result{OK: status == "" || status == "up" || status == "ok", Msg: strings.TrimSpace(q.Get("msg"))}

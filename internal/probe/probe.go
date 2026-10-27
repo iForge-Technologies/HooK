@@ -157,8 +157,13 @@ func checkTCP(ctx context.Context, s Spec) Result {
 }
 
 // ForRemote strips what must not leave the hub: request headers (often auth
-// tokens) and bodies. Remote locations check reachability, not auth.
+// tokens), bodies and user:pass@ in the URL. Remote locations check
+// reachability, not auth.
 func (s Spec) ForRemote() Spec {
 	s.Headers, s.Body = nil, ""
+	if u, err := url.Parse(s.Target); err == nil && u.User != nil {
+		u.User = nil
+		s.Target = u.String()
+	}
 	return s
 }

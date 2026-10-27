@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/netip"
 	"strings"
 	"time"
 )
@@ -69,6 +70,13 @@ func checkDNS(ctx context.Context, s Spec) Result {
 	}
 	if len(records) == 0 {
 		return Result{Latency: lat, Msg: "No records"}
+	}
+	if s.publicOnly {
+		for _, r := range records {
+			if ip, err := netip.ParseAddr(r); err == nil && !isPublic(ip) {
+				return Result{Latency: lat, Msg: Refused + "answer is not a public address"}
+			}
+		}
 	}
 	got := strings.Join(records, ", ")
 	if want := strings.TrimSpace(c.DNSExpected); want != "" && !dnsMatch(records, want, strings.ToUpper(c.DNSRecord)) {

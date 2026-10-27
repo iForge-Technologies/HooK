@@ -5,6 +5,7 @@ package health
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/shirou/gopsutil/v4/disk"
 
+	"hook/internal/alert"
 	"hook/internal/store"
 )
 
@@ -70,7 +72,9 @@ func New(st *store.Store, o Options, log *slog.Logger) *Monitor {
 		o.Every = time.Minute
 	}
 	m := &Monitor{st: st, dataDir: o.DataDir, lastBeat: o.LastBeat, monitors: o.Monitors, started: time.Now(),
-		url: o.URL, fail: o.FailURL, every: o.Every, client: &http.Client{Timeout: 10 * time.Second}, log: log}
+		url: o.URL, fail: o.FailURL, every: o.Every, log: log,
+		// A redirect would let the ping service send the hub elsewhere.
+		client: &http.Client{Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
 	m.deadman = Deadman{Configured: o.URL != "", URLHost: host(o.URL), Every: int(o.Every.Seconds())}
 	return m
 }
@@ -177,15 +181,15 @@ func (m *Monitor) pass(ctx context.Context) {
 	}
 }
 
-func (m *Monitor) ping(ctx context.Context, url string) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+func (m *Monitor) ping(ctx context.Context, target string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
-		return err
+		return errors.New("invalid dead-man URL")
 	}
 	req.Header.Set("User-Agent", "Hook-Hub/deadman")
 	resp, err := m.client.Do(req)
 	if err != nil {
-		return err
+		return alert.StripURL(err) // the URL is the secret
 	}
 	resp.Body.Close()
 	if resp.StatusCode >= 300 {

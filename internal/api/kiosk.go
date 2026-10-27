@@ -101,8 +101,12 @@ var kioskCache struct {
 func (s *Server) kiosk(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	link, err := s.store.KioskByToken(r.PathValue("token"))
-	if err != nil {
+	if errors.Is(err, store.ErrNotFound) {
 		writeErr(w, http.StatusNotFound, "this kiosk link doesn't exist or was revoked")
+		return
+	}
+	if err != nil { // a busy database isn't a revoked link
+		writeErr(w, http.StatusServiceUnavailable, "the hub is busy, try again shortly")
 		return
 	}
 	kioskCache.Lock()
@@ -117,7 +121,11 @@ func (s *Server) kiosk(w http.ResponseWriter, r *http.Request) {
 	}
 	b := kioskCache.board
 	b.Name = link.Name
-	body, _ := json.Marshal(b)
+	body, err := json.Marshal(b)
+	if err != nil {
+		s.internal(w, err)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Write(body)
 }
@@ -182,8 +190,8 @@ func (s *Server) buildKiosk() (kioskBoard, error) {
 			ks.Connected = live
 			cpu, disk := m.CPU, m.DiskPct
 			ks.CPU, ks.Disk = &cpu, &disk
-			if m.MemTotal > 0 {
-				mem := m.MemUsed / m.MemTotal * 100
+			if m.MemTotal >= 1<<20 {
+				mem := min(100, max(0, m.MemUsed/m.MemTotal*100))
 				ks.Mem = &mem
 			}
 		}

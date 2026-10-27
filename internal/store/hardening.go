@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -145,15 +146,25 @@ func (s *Store) KioskLinks() ([]KioskLink, error) {
 	return out, rows.Err()
 }
 
-// KioskByToken finds a link and records that a display used it.
+// KioskByToken finds a link and records that a display used it. The lookup is
+// a plain read: anonymous requests with made-up tokens must never queue on
+// SQLite's single writer. last_seen is written at most once a minute.
 func (s *Store) KioskByToken(token string) (*KioskLink, error) {
 	var k KioskLink
-	err := s.db.QueryRow(`UPDATE kiosk_links SET last_seen = ? WHERE token_hash = ? RETURNING id, name, created_at, last_seen`, nowMs(), hashToken(token)).
+	err := s.db.QueryRow(`SELECT id, name, created_at, last_seen FROM kiosk_links WHERE token_hash = ?`, hashToken(token)).
 		Scan(&k.ID, &k.Name, &k.CreatedAt, &k.LastSeen)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
-	return &k, err
+	if err != nil {
+		return nil, err
+	}
+	if now := nowMs(); now-k.LastSeen > 60_000 {
+		if _, err := s.db.Exec(`UPDATE kiosk_links SET last_seen = ? WHERE id = ?`, now, k.ID); err == nil {
+			k.LastSeen = now
+		}
+	}
+	return &k, nil
 }
 
 func (s *Store) DeleteKioskLink(id int64) error {
@@ -176,16 +187,26 @@ func (s *Store) Ping() error {
 }
 
 // Backup writes a consistent copy of the live database to path with
-// VACUUM INTO, which is safe while the hub is running.
+// VACUUM INTO, which is safe while the hub is running. The file is created
+// owner-only (0600) first; VACUUM INTO fills an existing empty file and keeps
+// its mode, whatever the directory's permissions are.
 func (s *Store) Backup(path string) error {
-	if _, err := os.Stat(path); err == nil {
-		return errors.New("refusing to overwrite " + path)
-	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	_, err := s.db.Exec(`VACUUM INTO ?`, path)
-	return err
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		if errors.Is(err, fs.ErrExist) {
+			return errors.New("refusing to overwrite " + path)
+		}
+		return err
+	}
+	f.Close()
+	if _, err := s.db.Exec(`VACUUM INTO ?`, path); err != nil {
+		os.Remove(path)
+		return err
+	}
+	return nil
 }
 
 // Size returns the database file size in bytes (main file plus WAL).

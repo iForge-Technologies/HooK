@@ -27,15 +27,18 @@ type TypeSpec struct {
 	Required []string
 	Secret   []string
 	URLs     []string // fields that must be http(s) URLs
+	// Dest fields decide where the secrets go. A stored secret is only kept
+	// (sent back masked) while these stay the same.
+	Dest []string
 }
 
 var Types = map[string]TypeSpec{
 	"telegram": {Required: []string{"botToken", "chatId"}, Secret: []string{"botToken"}},
 	"discord":  {Required: []string{"webhookUrl"}, Secret: []string{"webhookUrl"}, URLs: []string{"webhookUrl"}},
 	"slack":    {Required: []string{"webhookUrl"}, Secret: []string{"webhookUrl"}, URLs: []string{"webhookUrl"}},
-	"email":    {Required: []string{"host", "port", "from", "to"}, Secret: []string{"password"}},
-	"webhook":  {Required: []string{"url"}, Secret: []string{"secret"}, URLs: []string{"url"}},
-	"ntfy":     {Required: []string{"topic"}, Secret: []string{"token"}, URLs: []string{"server"}},
+	"email":    {Required: []string{"host", "port", "from", "to"}, Secret: []string{"password"}, Dest: []string{"host", "port", "security", "username"}},
+	"webhook":  {Required: []string{"url"}, Secret: []string{"secret"}, URLs: []string{"url"}, Dest: []string{"url"}},
+	"ntfy":     {Required: []string{"topic"}, Secret: []string{"token"}, URLs: []string{"server"}, Dest: []string{"server"}},
 	"browser":  {}, // Web Push to every device that enabled it in Settings
 }
 
@@ -76,11 +79,26 @@ func (d *Dispatcher) postJSON(ctx context.Context, u string, body any, header ht
 	return d.do(req)
 }
 
+// StripURL drops the URL from a transport error, keeping the operation and
+// host. Webhook and dead-man URLs carry their secret in the path or query,
+// and these errors end up in logs.
+func StripURL(err error) error {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		host := ""
+		if u, perr := url.Parse(ue.URL); perr == nil {
+			host = u.Host
+		}
+		return fmt.Errorf("%s %s: %w", ue.Op, host, ue.Err)
+	}
+	return err
+}
+
 func (d *Dispatcher) do(req *http.Request) error {
 	req.Header.Set("User-Agent", "Hook-Alerts/0.1")
 	resp, err := d.client.Do(req)
 	if err != nil {
-		return err
+		return StripURL(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {

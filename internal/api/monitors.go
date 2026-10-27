@@ -327,8 +327,14 @@ func normalize(m *store.Monitor) error {
 		switch m.Type {
 		case "postgres":
 			valid = strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://") || strings.Contains(dsn, "host=")
+			if _, err := checks.PostgresConfig(dsn, c.IgnoreTLS); valid && err != nil {
+				return err
+			}
 		case "mysql":
-			_, err := checks.MySQLDSN(dsn)
+			_, err := checks.MySQLDSN(dsn, c.IgnoreTLS)
+			if errors.Is(err, checks.ErrUnverified) {
+				return err
+			}
 			valid = err == nil
 		case "redis":
 			valid = strings.HasPrefix(dsn, "redis://") || strings.HasPrefix(dsn, "rediss://")
@@ -339,7 +345,7 @@ func normalize(m *store.Monitor) error {
 			return fmt.Errorf("connection string should look like %s", examples[m.Type])
 		}
 		m.Target = checks.RedactDSN(m.Type, dsn)
-		m.Config = store.MonitorConfig{DSN: dsn}
+		m.Config = store.MonitorConfig{DSN: dsn, IgnoreTLS: c.IgnoreTLS && (m.Type == "postgres" || m.Type == "mysql")}
 	case "push":
 		m.Target = "push"
 		m.Config = store.MonitorConfig{PushToken: c.PushToken}
@@ -415,10 +421,18 @@ func (s *Server) updateMonitor(w http.ResponseWriter, r *http.Request, se *sessi
 		return
 	}
 	m.ID, m.Active = id, old.Active
+	// A kept (masked) header stays bound to where it was entered for: send it
+	// back with a new type or URL and it must be typed in again, or a session
+	// holder could point the stored secret at their own server.
 	for k, v := range m.Config.Headers {
-		if v == mask {
-			m.Config.Headers[k] = old.Config.Headers[k]
+		if v != mask {
+			continue
 		}
+		if m.Type != old.Type || strings.TrimSpace(m.Target) != old.Target || m.Config.IgnoreTLS != old.Config.IgnoreTLS {
+			writeErr(w, http.StatusBadRequest, fmt.Sprintf("re-enter the %s header: the URL changed", k))
+			return
+		}
+		m.Config.Headers[k] = old.Config.Headers[k]
 	}
 	if m.Config.DSN == mask {
 		m.Config.DSN = old.Config.DSN
@@ -467,6 +481,10 @@ func (s *Server) deleteMonitor(w http.ResponseWriter, r *http.Request, se *sessi
 		s.internal(w, err)
 		return
 	}
+	// The store dropped the monitor from status pages and windows; refresh
+	// the in-memory copies too.
+	s.cal.Reload()
+	s.forgetPublic()
 	s.events.Publish(events.Event{Type: "monitors"})
 	ok(w)
 }

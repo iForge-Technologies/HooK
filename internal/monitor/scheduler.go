@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
+	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -199,6 +201,19 @@ func (s *Scheduler) probe(ctx context.Context, m *store.Monitor) checks.Result {
 	return platform.Check(ctx, acct, m.Config.ProjectID)
 }
 
+// safeProbe runs probe, turning a panic (say, a database driver tripping over
+// a hostile server's reply) into a failed check for this monitor alone instead
+// of a crash of the whole hub.
+func (s *Scheduler) safeProbe(ctx context.Context, m *store.Monitor) (res checks.Result) {
+	defer func() {
+		if p := recover(); p != nil {
+			s.log.Error("check panicked", "monitor", m.Name, "type", m.Type, "panic", p)
+			res = checks.Result{Msg: "Check failed: malformed reply from the target"}
+		}
+	}()
+	return s.probe(ctx, m)
+}
+
 func (s *Scheduler) run(ctx context.Context, m *store.Monitor, w *worker) {
 	// Spread first checks so a restart doesn't fire everything at once.
 	spread := min(m.Interval, 10)
@@ -213,7 +228,7 @@ func (s *Scheduler) run(ctx context.Context, m *store.Monitor, w *worker) {
 		case <-w.kick:
 			timer.Stop()
 		}
-		res := s.probe(ctx, m)
+		res := s.safeProbe(ctx, m)
 		if ctx.Err() != nil {
 			return // paused, edited or deleted mid-check: drop the result
 		}
@@ -225,6 +240,25 @@ type state struct {
 	status string
 	since  int64
 	fails  int
+	sent   []time.Time // down/up alerts sent within flapWindow
+}
+
+// A monitor sends at most flapLimit down/up alerts per flapWindow. Further
+// changes are still recorded, but not sent, so a flapping monitor (or a
+// misused push token) can't flood alert channels.
+const (
+	flapLimit  = 6
+	flapWindow = 10 * time.Minute
+)
+
+// mayAlert spends one of the monitor's alerts, if any are left.
+func (st *state) mayAlert(now time.Time) bool {
+	st.sent = slices.DeleteFunc(st.sent, func(t time.Time) bool { return now.Sub(t) > flapWindow })
+	if len(st.sent) >= flapLimit {
+		return false
+	}
+	st.sent = append(st.sent, now)
+	return true
 }
 
 // process records a result and returns the delay until the next check.
@@ -282,7 +316,7 @@ func (s *Scheduler) process(m *store.Monitor, st *state, res checks.Result) time
 		s.log.Warn("monitor down", "monitor", m.Name, "reason", msg)
 		ev := alert.MonitorEvent(alert.KindDown, m, now)
 		ev.Msg = msg
-		s.alerts.Notify(ev)
+		s.notify(m, st, ev, now)
 	case prev == "down" && (next == "up" || next == "degraded"):
 		started, err := s.store.ResolveIncident(m.ID, hb.TS)
 		if err != nil {
@@ -295,7 +329,7 @@ func (s *Scheduler) process(m *store.Monitor, st *state, res checks.Result) time
 		s.log.Info("monitor recovered", "monitor", m.Name, "downtime", downtime)
 		ev := alert.MonitorEvent(alert.KindUp, m, now)
 		ev.Msg, ev.Downtime = msg, downtime
-		s.alerts.Notify(ev)
+		s.notify(m, st, ev, now)
 	}
 
 	if !res.CertExpires.IsZero() {
@@ -311,6 +345,15 @@ func (s *Scheduler) process(m *store.Monitor, st *state, res checks.Result) time
 		return time.Duration(m.RetryInterval) * time.Second
 	}
 	return time.Duration(m.Interval) * time.Second
+}
+
+// notify sends a down/up alert unless the monitor is flapping.
+func (s *Scheduler) notify(m *store.Monitor, st *state, ev alert.Event, now time.Time) {
+	if !st.mayAlert(now) {
+		s.log.Warn("monitor flapping: alert not sent", "monitor", m.Name, "kind", ev.Kind)
+		return
+	}
+	s.alerts.Notify(ev)
 }
 
 func (s *Scheduler) handleCert(m *store.Monitor, res checks.Result, now time.Time) {
@@ -346,6 +389,9 @@ func (s *Scheduler) handleCert(m *store.Monitor, res checks.Result, now time.Tim
 // Server metrics: raw 5 s frames for 48 h, minute rollups 14 days, hourly 2 years.
 const hostRawRetention = 48 * time.Hour
 
+// Resolved incidents and server events are kept this long.
+const eventRetentionDays = 365
+
 // Maintain keeps rollups fresh and enforces retention.
 func Maintain(ctx context.Context, st *store.Store, rawDays int, log *slog.Logger) {
 	tick := time.NewTicker(20 * time.Second) // uptime % lags live status by at most this
@@ -368,11 +414,12 @@ func Maintain(ctx context.Context, st *store.Store, rawDays int, log *slog.Logge
 		if time.Since(lastPrune) > time.Hour {
 			raw := time.Now().Add(-time.Duration(rawDays) * 24 * time.Hour).UnixMilli()
 			roll := time.Now().AddDate(-2, 0, 0).UnixMilli()
-			if err := st.Prune(raw, roll); err != nil {
+			events := time.Now().AddDate(0, 0, -eventRetentionDays).UnixMilli()
+			if err := st.Prune(raw, roll, events); err != nil {
 				log.Error("prune", "err", err)
 			}
 			now := time.Now()
-			if err := st.PruneHosts(now.Add(-hostRawRetention).UnixMilli(), now.AddDate(0, 0, -14).UnixMilli(), roll); err != nil {
+			if err := st.PruneHosts(now.Add(-hostRawRetention).UnixMilli(), now.AddDate(0, 0, -14).UnixMilli(), roll, events); err != nil {
 				log.Error("prune hosts", "err", err)
 			}
 			lastPrune = time.Now()
@@ -385,14 +432,19 @@ func Maintain(ctx context.Context, st *store.Store, rawDays int, log *slog.Logge
 	}
 }
 
+// minOverride is how many remote locations must reach a target before a
+// failure seen from the hub is downgraded. One location's word isn't enough:
+// a single compromised server could otherwise silence every outage.
+const minOverride = 2
+
 // confirm asks up to three other locations to re-check a failed network
-// monitor. Down needs at least two locations to agree: if every remote location
-// reaches the target, the problem is between the hub and the target, so the
-// check counts as "slow" (up, but flagged) rather than paging anyone. Monitors
-// with custom headers aren't confirmed remotely, since headers (often auth)
-// never leave the hub.
+// monitor. If at least minOverride remote locations reach the target and none
+// fail, the problem is between the hub and the target, so the check counts as
+// "slow" (up, but flagged) rather than paging anyone. Monitors with custom
+// headers, or with credentials or a query string in the URL, aren't confirmed
+// remotely: auth never leaves the hub.
 func (s *Scheduler) confirm(ctx context.Context, m *store.Monitor, res checks.Result) checks.Result {
-	if res.OK || s.prober == nil || !checks.IsNetwork(m.Type) || m.Config.NoConfirm || len(m.Config.Headers) > 0 {
+	if res.OK || s.prober == nil || !checks.IsNetwork(m.Type) || m.Config.NoConfirm || len(m.Config.Headers) > 0 || urlSecrets(m) {
 		return res
 	}
 	outs := s.prober.Probe(ctx, checks.SpecFor(m), 3)
@@ -411,13 +463,28 @@ func (s *Scheduler) confirm(ctx context.Context, m *store.Monitor, res checks.Re
 			failed = append(failed, o.Location)
 		}
 	}
-	if len(failed) == 0 {
+	if len(failed) == 0 && len(ok) >= minOverride {
 		return checks.Result{OK: true, Partial: true, Latency: best, Code: res.Code,
 			Msg: fmt.Sprintf("Failed from the hub (%s) but reachable from %s", res.Msg, strings.Join(ok, ", "))}
 	}
-	res.Msg = fmt.Sprintf("%s · confirmed from %s", res.Msg, strings.Join(failed, ", "))
-	if len(ok) > 0 {
-		res.Msg += "; reachable from " + strings.Join(ok, ", ")
+	if len(failed) > 0 {
+		res.Msg = fmt.Sprintf("%s · confirmed from %s", res.Msg, strings.Join(failed, ", "))
+		if len(ok) > 0 {
+			res.Msg += "; reachable from " + strings.Join(ok, ", ")
+		}
+	} else {
+		res.Msg += " · reachable from " + strings.Join(ok, ", ") + ", too few locations to rule out an outage"
 	}
 	return checks.Result(probe.Clip(res))
+}
+
+// urlSecrets reports targets that may carry credentials in the URL itself:
+// user:pass@ or a query string (tokens often live there). Such monitors are
+// checked from the hub only.
+func urlSecrets(m *store.Monitor) bool {
+	if m.Type != "http" && m.Type != "keyword" {
+		return false
+	}
+	u, err := url.Parse(m.Target)
+	return err != nil || u.User != nil || u.RawQuery != ""
 }

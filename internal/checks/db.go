@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"net/url"
 	"regexp"
 	"strconv"
@@ -28,9 +29,58 @@ import (
 
 var DBTypes = []string{"postgres", "mysql", "redis", "mongodb"}
 
+// ErrUnverified refuses to send a database password over a connection whose
+// server hasn't proven who it is: anyone answering for the host could read it.
+var ErrUnverified = errors.New("the connection to this database isn't verified, so a server posing as it could learn the password. " +
+	"Use sslmode=verify-full (PostgreSQL) or tls=true (MySQL), or turn on \"Allow unverified TLS\" to accept that risk")
+
+// isLocal reports loopback addresses and unix sockets, where nobody can sit in
+// between.
+func isLocal(host string) bool {
+	host = strings.Trim(host, "[]")
+	if host == "localhost" || strings.HasPrefix(host, "/") {
+		return true
+	}
+	ip, err := netip.ParseAddr(host)
+	return err == nil && ip.IsLoopback()
+}
+
+// PostgresConfig parses a PostgreSQL connection string and applies the hub's
+// rule for the password. Unless allowUnverified is set, every non-local host
+// must use TLS with a verified certificate (sslmode=verify-full or
+// verify-ca). When it is set, password auth that would hand the password over
+// in the clear is still refused, unless the string names require_auth itself.
+func PostgresConfig(dsn string, allowUnverified bool) (*pgx.ConnConfig, error) {
+	cfg, err := pgx.ParseConfig(dsn)
+	if err != nil {
+		return nil, errors.New("invalid connection string: " + dbErr(err, dsn))
+	}
+	verified := func(host string, t *tls.Config) bool {
+		return isLocal(host) || (t != nil && (!t.InsecureSkipVerify || t.VerifyPeerCertificate != nil))
+	}
+	ok := verified(cfg.Host, cfg.TLSConfig)
+	for _, f := range cfg.Fallbacks {
+		ok = ok && verified(f.Host, f.TLSConfig)
+	}
+	if ok {
+		return cfg, nil
+	}
+	if !allowUnverified {
+		return nil, ErrUnverified
+	}
+	if cfg.RequireAuth == "" {
+		cfg.RequireAuth = "scram-sha-256"
+	}
+	return cfg, nil
+}
+
 func checkPostgres(ctx context.Context, m *store.Monitor) Result {
+	cfg, err := PostgresConfig(m.Config.DSN, m.Config.IgnoreTLS)
+	if err != nil {
+		return Result{Msg: err.Error()}
+	}
 	start := time.Now()
-	conn, err := pgx.Connect(ctx, m.Config.DSN)
+	conn, err := pgx.ConnectConfig(ctx, cfg)
 	if err != nil {
 		return Result{Latency: time.Since(start), Msg: dbErr(err, m.Config.DSN)}
 	}
@@ -39,11 +89,15 @@ func checkPostgres(ctx context.Context, m *store.Monitor) Result {
 	if err := conn.QueryRow(ctx, "SELECT current_setting('server_version')").Scan(&version); err != nil {
 		return Result{Latency: time.Since(start), Msg: dbErr(err, m.Config.DSN)}
 	}
-	return Result{OK: true, Latency: time.Since(start), Msg: "PostgreSQL " + strings.Fields(version)[0]}
+	msg := "PostgreSQL"
+	if f := strings.Fields(version); len(f) > 0 { // the server's word: may be empty
+		msg += " " + f[0]
+	}
+	return Result{OK: true, Latency: time.Since(start), Msg: msg}
 }
 
 func checkMySQL(ctx context.Context, m *store.Monitor) Result {
-	dsn, err := MySQLDSN(m.Config.DSN)
+	dsn, err := MySQLDSN(m.Config.DSN, m.Config.IgnoreTLS)
 	if err != nil {
 		return Result{Msg: err.Error()}
 	}
@@ -62,17 +116,36 @@ func checkMySQL(ctx context.Context, m *store.Monitor) Result {
 }
 
 // MySQLDSN accepts the driver's native form (user:pass@tcp(host:3306)/db) or a
-// mysql://user:pass@host:3306/db URL.
-func MySQLDSN(s string) (string, error) {
-	if !strings.HasPrefix(s, "mysql://") {
-		if _, err := mysql.ParseDSN(s); err != nil {
-			return "", errors.New("connection string should look like mysql://user:pass@host:3306/db")
+// mysql://user:pass@host:3306/db URL. Non-local servers get verified TLS
+// (tls=true) unless the string asks for something else; anything weaker needs
+// allowUnverified (see PostgresConfig).
+func MySQLDSN(s string, allowUnverified bool) (string, error) {
+	cfg, err := mysqlConfig(s)
+	if err != nil {
+		return "", errors.New("connection string should look like mysql://user:pass@host:3306/db")
+	}
+	host, _, _ := net.SplitHostPort(cfg.Addr)
+	if cfg.Net == "tcp" && !isLocal(host) {
+		switch cfg.TLSConfig {
+		case "":
+			cfg.TLSConfig = "true"
+		case "true":
+		default: // false, skip-verify, preferred
+			if !allowUnverified {
+				return "", ErrUnverified
+			}
 		}
-		return s, nil
+	}
+	return cfg.FormatDSN(), nil
+}
+
+func mysqlConfig(s string) (*mysql.Config, error) {
+	if !strings.HasPrefix(s, "mysql://") {
+		return mysql.ParseDSN(s)
 	}
 	u, err := url.Parse(s)
 	if err != nil || u.Host == "" {
-		return "", errors.New("connection string should look like mysql://user:pass@host:3306/db")
+		return nil, errors.New("bad URL")
 	}
 	cfg := mysql.NewConfig()
 	cfg.User = u.User.Username()
@@ -86,7 +159,7 @@ func MySQLDSN(s string) (string, error) {
 	if v := u.Query().Get("tls"); v != "" {
 		cfg.TLSConfig = v
 	}
-	return cfg.FormatDSN(), nil
+	return cfg, nil
 }
 
 func checkMongo(ctx context.Context, m *store.Monitor) Result {
@@ -173,9 +246,12 @@ func checkRedis(ctx context.Context, m *store.Monitor) Result {
 
 var redisVersion = regexp.MustCompile(`redis_version:(\S+)`)
 
+// maxRESPLine caps one reply line; a real PING or INFO header is tiny.
+const maxRESPLine = 64 << 10
+
 // readRESP reads one simple, error, integer or bulk reply.
 func readRESP(r *bufio.Reader) (string, error) {
-	line, err := r.ReadString('\n')
+	line, err := readLine(r, maxRESPLine)
 	if err != nil {
 		return "", err
 	}
@@ -203,6 +279,25 @@ func readRESP(r *bufio.Reader) (string, error) {
 		return string(buf[:n]), nil
 	}
 	return "", fmt.Errorf("unexpected reply %q", line)
+}
+
+// readLine reads up to and including '\n', failing once the line passes max
+// bytes instead of buffering whatever the server sends.
+func readLine(r *bufio.Reader, max int) (string, error) {
+	var b []byte
+	for {
+		chunk, err := r.ReadSlice('\n')
+		if len(b)+len(chunk) > max {
+			return "", errors.New("reply too large")
+		}
+		b = append(b, chunk...)
+		if err == nil {
+			return string(b), nil
+		}
+		if !errors.Is(err, bufio.ErrBufferFull) {
+			return "", err
+		}
+	}
 }
 
 func readFull(r *bufio.Reader, buf []byte) (int, error) {

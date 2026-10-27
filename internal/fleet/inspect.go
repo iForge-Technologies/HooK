@@ -11,6 +11,20 @@ import (
 	"hook/internal/store"
 )
 
+const (
+	// maxContainers and maxUnits are far above any real server; the rest of a
+	// longer list is ignored.
+	maxContainers = 500
+	maxUnits      = 1000
+
+	// Each server may open eventBudget container or service problems (or send
+	// that many restart alerts) per eventWindow. Past that, one summary event
+	// and alert stand in for the rest, so an agent inventing container names
+	// can't flood alert channels or the database.
+	eventBudget = 20
+	eventWindow = 10 * time.Minute
+)
+
 // crashRestarted means "crashed and came back between snapshots": running both
 // times with a higher restart count. Starting a stopped container, or one
 // recovering from an open alert, isn't a restart.
@@ -23,6 +37,12 @@ func crashRestarted(c proto.Container, wasRunning bool, prevRestarts int, known 
 // Containers only alert on "stopped" after we've seen them running, so long-
 // dead containers left on a server never page anyone.
 func (f *Fleet) inspect(id int64, s *proto.Snapshot, at time.Time) {
+	if s.Docker != nil && len(s.Docker.Containers) > maxContainers {
+		s.Docker.Containers = s.Docker.Containers[:maxContainers]
+	}
+	if len(s.Units) > maxUnits {
+		s.Units = s.Units[:maxUnits]
+	}
 	f.mu.Lock()
 	l := f.live[id]
 	if l == nil {
@@ -52,7 +72,25 @@ func (f *Fleet) inspect(id int64, s *proto.Snapshot, at time.Time) {
 		}
 	}
 	changed := false
+	suppressed := 0
+	// take spends one unit of the server's alert budget.
+	take := func() bool {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if at.Sub(l.budgetStart) > eventWindow {
+			l.budgetStart, l.budgetUsed, l.summarized = at, 0, false
+		}
+		if l.budgetUsed >= eventBudget {
+			suppressed++
+			return false
+		}
+		l.budgetUsed++
+		return true
+	}
 	raise := func(kind, subject, msg string) {
+		if _, open := isOpen[kind+"/"+subject]; open || !take() {
+			return // already open, or over budget: no new row and no alert
+		}
 		if opened, _ := f.store.OpenHostEvent(id, kind, subject, at.UnixMilli(), 0, msg); !opened {
 			return
 		}
@@ -96,14 +134,14 @@ func (f *Fleet) inspect(id int64, s *proto.Snapshot, at time.Time) {
 				clear(alert.KindContainer, alert.KindContOK, c.Name, h.Thresholds.Containers)
 			}
 			prev, known := prevRestarts[c.Name]
-			if problem == "" && h.Thresholds.Containers && crashRestarted(c, wasRunning[c.Name], prev, known) {
+			if problem == "" && h.Thresholds.Containers && crashRestarted(c, wasRunning[c.Name], prev, known) && take() {
 				ev := alert.ServerEvent(alert.KindRestart, &h, at)
 				ev.Subject, ev.Msg = c.Name, fmt.Sprintf("%d restarts so far", c.Restarts)
 				f.alerts.Notify(ev)
 			}
 		}
 		for key := range isOpen { // removed containers: nothing left to watch
-			if name, ok := strings.CutPrefix(key, alert.KindContainer+"/"); ok && !present[name] {
+			if name, ok := strings.CutPrefix(key, alert.KindContainer+"/"); ok && !present[name] && name != summarySubject {
 				clear(alert.KindContainer, "", name, false)
 			}
 		}
@@ -133,7 +171,28 @@ func (f *Fleet) inspect(id int64, s *proto.Snapshot, at time.Time) {
 			clear(alert.KindService, "", name, false)
 		}
 	}
+	if suppressed > 0 {
+		f.mu.Lock()
+		first := !l.summarized
+		l.summarized = true
+		f.mu.Unlock()
+		msg := fmt.Sprintf("%d more container or service problems; alerts paused for this server for up to %s", suppressed, alert.HumanDuration(eventWindow))
+		if first {
+			if opened, _ := f.store.OpenHostEvent(id, alert.KindContainer, summarySubject, at.UnixMilli(), 0, msg); opened {
+				changed = true
+				ev := alert.ServerEvent(alert.KindContainer, &h, at)
+				ev.Subject, ev.Msg = summarySubject, msg
+				f.log.Warn("server problem alerts suppressed", "server", h.Name, "count", suppressed)
+				f.alerts.Notify(ev)
+			}
+		}
+	} else if _, open := isOpen[alert.KindContainer+"/"+summarySubject]; open {
+		clear(alert.KindContainer, "", summarySubject, false)
+	}
 	if changed {
 		f.events.Publish(events.Event{Type: "hosts"})
 	}
 }
+
+// summarySubject names the one event that stands in for suppressed problems.
+const summarySubject = "(many)"

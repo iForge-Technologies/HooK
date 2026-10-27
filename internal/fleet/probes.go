@@ -19,9 +19,14 @@ type Outcome struct {
 }
 
 type pendingProbe struct {
+	hostID   int64 // only this server's answer counts
 	location string
 	ch       chan Outcome
 }
+
+// isLocation reports whether a server confirms failures: the admin enabled it
+// as a location and its agent runs probes. An agent can't opt itself in.
+func isLocation(l *live) bool { return l.host.ProbeLocation && l.host.Info.Probes }
 
 // Locations lists the names of connected servers that run probes.
 func (f *Fleet) Locations() []string {
@@ -29,7 +34,7 @@ func (f *Fleet) Locations() []string {
 	defer f.mu.Unlock()
 	var out []string
 	for id := range f.conns {
-		if l := f.live[id]; l != nil && l.host.Info.Probes {
+		if l := f.live[id]; l != nil && isLocation(l) {
 			out = append(out, l.host.Name)
 		}
 	}
@@ -42,13 +47,14 @@ func (f *Fleet) Probe(ctx context.Context, spec probe.Spec, n int) []Outcome {
 	spec = spec.ForRemote()
 	type target struct {
 		c    *agentConn
+		id   int64
 		name string
 	}
 	f.mu.Lock()
 	var ts []target
 	for id, c := range f.conns {
-		if l := f.live[id]; l != nil && l.host.Info.Probes && l.host.Status == "online" {
-			ts = append(ts, target{c, l.host.Name})
+		if l := f.live[id]; l != nil && isLocation(l) && l.host.Status == "online" {
+			ts = append(ts, target{c, id, l.host.Name})
 		}
 	}
 	f.mu.Unlock()
@@ -66,7 +72,7 @@ func (f *Fleet) Probe(ctx context.Context, spec probe.Spec, n int) []Outcome {
 		ids[i] = probeID()
 		chans[i] = make(chan Outcome, 1)
 		f.mu.Lock()
-		f.pending[ids[i]] = pendingProbe{location: t.name, ch: chans[i]}
+		f.pending[ids[i]] = pendingProbe{hostID: t.id, location: t.name, ch: chans[i]}
 		f.mu.Unlock()
 		if err := t.c.send(proto.TypeProbe, proto.ProbeRequest{ID: ids[i], Spec: spec}); err != nil {
 			chans[i] <- Outcome{Location: t.name, Skipped: true}
@@ -94,11 +100,16 @@ func (f *Fleet) Probe(ctx context.Context, spec probe.Spec, n int) []Outcome {
 	return out
 }
 
-// deliver hands an agent's answer to the waiting Probe call.
-func (f *Fleet) deliver(r proto.ProbeResult) {
+// deliver hands an agent's answer to the waiting Probe call. Only the server
+// the probe was sent to can answer it.
+func (f *Fleet) deliver(hostID int64, r proto.ProbeResult) {
 	f.mu.Lock()
 	p, ok := f.pending[r.ID]
-	delete(f.pending, r.ID)
+	if ok && p.hostID != hostID {
+		ok = false
+	} else {
+		delete(f.pending, r.ID)
+	}
 	f.mu.Unlock()
 	if !ok {
 		return

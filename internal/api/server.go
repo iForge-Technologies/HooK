@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"hook/internal/alert"
@@ -44,12 +45,17 @@ type Server struct {
 	log        *slog.Logger
 	static     fs.FS
 	loginLimit *auth.Limiter
+	pushLimit  *auth.Limiter // one push per monitor per 10 s
 	setupMu    sync.Mutex
+
+	// sessionsChanged is bumped whenever sessions are revoked, so open event
+	// streams re-check theirs (see stream).
+	sessionsChanged atomic.Uint64
 }
 
 func New(cfg config.Config, st *store.Store, sched *monitor.Scheduler, fl *fleet.Fleet, cal *maint.Calendar, hm *health.Monitor, push *pwa.Pusher, al *alert.Dispatcher, ev *events.Broker, static fs.FS, log *slog.Logger) *Server {
 	return &Server{cfg: cfg, store: st, sched: sched, fleet: fl, cal: cal, health: hm, pusher: push, alerts: al, events: ev, static: static, log: log,
-		loginLimit: auth.NewLimiter(10, 10*time.Minute)}
+		loginLimit: auth.NewLimiter(10, 10*time.Minute), pushLimit: auth.NewLimiter(1, 10*time.Second)}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -248,11 +254,18 @@ func (s *Server) clientIP(r *http.Request) string {
 
 // ---- helpers ----
 
+// writeJSON encodes before writing the status, so a value that can't be
+// encoded becomes a 500 instead of an empty 200.
 func writeJSON(w http.ResponseWriter, code int, v any) {
+	body, err := json.Marshal(v)
+	if err != nil {
+		slog.Error("encode response", "err", err)
+		code, body = http.StatusInternalServerError, []byte(`{"error":"internal error"}`)
+	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(code)
-	json.NewEncoder(w).Encode(v)
+	w.Write(append(body, '\n'))
 }
 
 func writeErr(w http.ResponseWriter, code int, msg string) {

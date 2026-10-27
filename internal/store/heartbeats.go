@@ -156,9 +156,13 @@ func (s *Store) AvgLatency(sinceMs int64) (map[int64]int, error) {
 	return out, rows.Err()
 }
 
-// Prune deletes raw beats and rollups older than the given cut-offs.
-func (s *Store) Prune(rawBeforeMs, rollupBeforeMs int64) error {
+// Prune deletes raw beats, rollups and resolved incidents older than the given
+// cut-offs.
+func (s *Store) Prune(rawBeforeMs, rollupBeforeMs, incidentsBeforeMs int64) error {
 	if _, err := s.db.Exec(`DELETE FROM heartbeats WHERE ts < ?`, rawBeforeMs); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`DELETE FROM incidents WHERE resolved_at IS NOT NULL AND resolved_at < ?`, incidentsBeforeMs); err != nil {
 		return err
 	}
 	_, err := s.db.Exec(`DELETE FROM rollup_1h WHERE hour < ?`, rollupBeforeMs)

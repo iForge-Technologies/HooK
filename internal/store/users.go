@@ -138,6 +138,17 @@ func (s *Store) CompleteMFA(token string, ttl time.Duration) error {
 	return err
 }
 
+// FailMFA counts a wrong 2FA code against a pending sign-in and returns the
+// total so far.
+func (s *Store) FailMFA(token string) (int, error) {
+	var n int
+	err := s.db.QueryRow(`UPDATE sessions SET mfa_fails = mfa_fails + 1 WHERE token_hash = ? AND mfa_pending = 1 RETURNING mfa_fails`, hashToken(token)).Scan(&n)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, ErrNotFound
+	}
+	return n, err
+}
+
 func (s *Store) DeleteSession(token string) error {
 	_, err := s.db.Exec(`DELETE FROM sessions WHERE token_hash = ?`, hashToken(token))
 	return err

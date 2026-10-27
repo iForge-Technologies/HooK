@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"slices"
 	"time"
 
@@ -40,7 +41,15 @@ func SpecFor(m *store.Monitor) probe.Spec {
 	}
 }
 
-func Run(ctx context.Context, m *store.Monitor) Result {
+// Run checks a monitor once. Drivers parse whatever the target sends back, so
+// a panic inside one becomes a failed result rather than a crash of the hub.
+func Run(ctx context.Context, m *store.Monitor) (res Result) {
+	defer func() {
+		if p := recover(); p != nil {
+			log.Printf("check %d (%s) panicked: %v", m.ID, m.Type, p)
+			res = Result{Msg: "Check failed: malformed reply from the target"}
+		}
+	}()
 	if IsNetwork(m.Type) {
 		return probe.Run(ctx, SpecFor(m))
 	}

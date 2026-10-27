@@ -68,7 +68,7 @@ func openKinds(t *testing.T, st *store.Store, id int64) map[string]store.HostEve
 
 func TestSustainedThreshold(t *testing.T) {
 	f, st, h := setup(t)
-	t0 := time.Now().Add(-10 * time.Minute)
+	t0 := time.Now().Add(-10 * time.Minute).Truncate(time.Second) // stored timestamps are whole seconds
 	at := func(sec int) time.Time { return t0.Add(time.Duration(sec) * time.Second) }
 
 	// 95% for 1 minute: not long enough to alert (limit holds 2 min).
@@ -113,7 +113,7 @@ func TestSustainedThreshold(t *testing.T) {
 
 func TestReplayedFramesDontAlert(t *testing.T) {
 	f, st, h := setup(t)
-	old := time.Now().Add(-90 * time.Minute) // buffered while the hub was unreachable
+	old := time.Now().Add(-90 * time.Minute).Truncate(time.Second) // buffered while the hub was unreachable
 	for s := 0; s <= 600; s += 5 {
 		send(t, f, h.ID, old.Add(time.Duration(s)*time.Second), 100)
 	}
@@ -131,8 +131,8 @@ func TestReplayedFramesDontAlert(t *testing.T) {
 // marked it offline again and opened a duplicate offline event.
 func TestReconnectDoesNotReopenOffline(t *testing.T) {
 	f, st, h := setup(t)
-	t0 := time.Now().Add(-10 * time.Minute)
-	feed(t, f, h.ID, t0, 10) // online
+	t0 := time.Now().Add(-10 * time.Minute).Truncate(time.Second) // stored timestamps are whole seconds
+	feed(t, f, h.ID, t0, 10)                                      // online
 
 	f.sweep(t0.Add(2 * time.Minute)) // silent: goes offline
 	if k := openKinds(t, st, h.ID); len(k) != 1 {

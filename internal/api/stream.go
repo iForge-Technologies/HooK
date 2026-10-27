@@ -25,16 +25,31 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, se *session) {
 	defer unsubscribe()
 	ping := time.NewTicker(25 * time.Second)
 	defer ping.Stop()
+	// The stream ends when its session does: re-checked whenever a session
+	// may have been revoked through the API, and at every ping otherwise.
+	gen := s.sessionsChanged.Load()
+	valid := func() bool {
+		cur, err := s.store.GetSession(se.token)
+		return err == nil && !cur.MFAPending
+	}
 	for {
 		select {
 		case <-r.Context().Done():
 			return
 		case ev := <-ch:
+			if g := s.sessionsChanged.Load(); g != gen {
+				if gen = g; !valid() {
+					return
+				}
+			}
 			b, _ := json.Marshal(ev.Data)
 			if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", ev.Type, b); err != nil {
 				return
 			}
 		case <-ping.C:
+			if !valid() {
+				return
+			}
 			if _, err := fmt.Fprint(w, ": ping\n\n"); err != nil {
 				return
 			}

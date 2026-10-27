@@ -25,8 +25,8 @@ const INTERVALS = [20, 30, 60, 120, 300, 600, 900, 1800, 3600];
 const PUSH_INTERVALS = [60, 300, 900, 1800, 3600, 7200, 21600, 43200, 86400, 604800];
 
 const DSN_HINT: Partial<Record<MonitorType, string>> = {
-  postgres: "postgres://monitor:pass@host:5432/db?sslmode=require",
-  mysql: "mysql://monitor:pass@host:3306/db",
+  postgres: "postgres://monitor:pass@host:5432/db?sslmode=verify-full",
+  mysql: "mysql://monitor:pass@host:3306/db?tls=true",
   redis: "rediss://default:pass@host:6380/0",
   mongodb: "mongodb+srv://monitor:pass@cluster.example.net/",
 };
@@ -314,6 +314,16 @@ export function MonitorFormPage({ id }: { id?: number }) {
                   required
                 />
               </Field>
+              {(f.type === "postgres" || f.type === "mysql") && (
+                <div className="mt-3">
+                  <Toggle
+                    checked={f.config.ignoreTls}
+                    onChange={(v) => setC("ignoreTls", v)}
+                    label="Allow unverified TLS"
+                    hint="Off: a remote server must present a valid certificate (sslmode=verify-full, tls=true), so nobody posing as it can learn the password. Turn on only for self-signed servers on a network you trust."
+                  />
+                </div>
+              )}
             </div>
           )}
           {(f.type === "vercel" || f.type === "render") && (
@@ -487,8 +497,8 @@ export function MonitorFormPage({ id }: { id?: number }) {
                   f.headers.some(([k]) => k.trim())
                     ? "Not used for this monitor: custom headers (often auth) never leave the hub."
                     : meta.data?.locations?.length
-                      ? `Before marking it down, ${meta.data.locations.join(", ")} re-check it. If they all reach it, it shows as Slow instead of paging you.`
-                      : "No probe locations connected yet. Install the agent with --probes on a server to add one."
+                      ? `Before marking it down, ${meta.data.locations.join(", ")} re-check it. If at least two reach it and none fail, it shows as Slow instead of paging you. URLs with credentials or a query string are only checked from the hub.`
+                      : "No probe locations yet. Install the agent with --probes on a server, then turn on “Confirm other monitors' failures” in its settings."
                 }
               />
             </div>

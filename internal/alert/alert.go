@@ -97,7 +97,13 @@ type Dispatcher struct {
 }
 
 func NewDispatcher(s *store.Store, publicURL string, log *slog.Logger) *Dispatcher {
-	return &Dispatcher{store: s, publicURL: publicURL, client: &http.Client{Timeout: 15 * time.Second}, log: log}
+	// Redirects aren't followed: the destination could otherwise bounce the
+	// hub's request to an address on its own network. A 3xx counts as a
+	// failed delivery.
+	client := &http.Client{Timeout: 15 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	return &Dispatcher{store: s, publicURL: publicURL, client: client, log: log}
 }
 
 // Notify sends ev to every active channel of its monitor or server, in the background.

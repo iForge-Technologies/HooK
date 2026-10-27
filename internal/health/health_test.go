@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -73,5 +74,27 @@ func TestNoMonitorsIsHealthy(t *testing.T) {
 		slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if r := m.Check(); !r.OK || r.Checks["disk"].Detail == "" {
 		t.Fatalf("fresh hub: %+v", r)
+	}
+}
+
+// Regression (audit): a failed dead-man ping put the secret URL into the log
+// and into Deadman.LastError, and the ping followed redirects.
+func TestDeadmanErrorsHideURLAndDontFollowRedirects(t *testing.T) {
+	st, dir := newStore(t)
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	m := New(st, Options{DataDir: dir, URL: "http://127.0.0.1:1/ping/SECRET-UUID", Every: time.Hour,
+		LastBeat: time.Now, Monitors: func() int { return 0 }}, log)
+	m.pass(context.Background())
+	if _, dm := m.Last(); dm.LastOK || dm.LastError == "" || strings.Contains(dm.LastError, "SECRET") {
+		t.Fatalf("LastError = %q", dm.LastError)
+	}
+
+	internal := 0
+	in := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { internal++ }))
+	defer in.Close()
+	out := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, in.URL, http.StatusFound) }))
+	defer out.Close()
+	if err := m.ping(context.Background(), out.URL); err == nil || internal != 0 {
+		t.Fatalf("redirect followed: err=%v internal hits=%d", err, internal)
 	}
 }

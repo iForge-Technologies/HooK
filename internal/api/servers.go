@@ -145,6 +145,9 @@ type serverInput struct {
 	Group      string            `json:"group"`
 	Thresholds *store.Thresholds `json:"thresholds"`
 	ChannelIDs []int64           `json:"channelIds"`
+	// ProbeLocation lets this server confirm other monitors' failures. Left
+	// out, an edit keeps the current setting.
+	ProbeLocation *bool `json:"probeLocation"`
 }
 
 func (in *serverInput) validate() error {
@@ -210,6 +213,7 @@ func (s *Server) createServer(w http.ResponseWriter, r *http.Request, se *sessio
 	if in.Thresholds != nil {
 		h.Thresholds = *in.Thresholds
 	}
+	h.ProbeLocation = in.ProbeLocation != nil && *in.ProbeLocation
 	token := newAgentToken()
 	if err := s.store.CreateHost(h, token); err != nil {
 		s.internal(w, err)
@@ -238,6 +242,9 @@ func (s *Server) updateServer(w http.ResponseWriter, r *http.Request, se *sessio
 	if in.Thresholds != nil {
 		h.Thresholds = *in.Thresholds
 	}
+	if in.ProbeLocation != nil {
+		h.ProbeLocation = *in.ProbeLocation
+	}
 	if err := s.store.UpdateHost(h); err != nil {
 		s.internal(w, err)
 		return
@@ -261,6 +268,7 @@ func (s *Server) deleteServer(w http.ResponseWriter, r *http.Request, se *sessio
 		return
 	}
 	s.fleet.Remove(id)
+	s.cal.Reload() // the store dropped it from maintenance windows
 	s.events.Publish(events.Event{Type: "hosts"})
 	ok(w)
 }

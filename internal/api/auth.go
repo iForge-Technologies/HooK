@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/base64"
+	"fmt"
 	"net/http"
 	"regexp"
 	"strings"
@@ -13,6 +14,9 @@ import (
 )
 
 var usernameRe = regexp.MustCompile(`^[A-Za-z0-9._-]{3,32}$`)
+
+// maxMFAFails is how many wrong codes one password sign-in may try.
+const maxMFAFails = 5
 
 func (s *Server) authStatus(w http.ResponseWriter, r *http.Request) {
 	n, err := s.store.CountUsers()
@@ -80,7 +84,9 @@ func (s *Server) setup(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	ip := s.clientIP(r)
-	if s.loginLimit.Blocked(ip) {
+	// The attempt is counted before hashing, so concurrent requests can't all
+	// pass the check; a successful sign-in clears it.
+	if !s.loginLimit.Take(ip) {
 		writeErr(w, http.StatusTooManyRequests, "Too many attempts. Try again in a few minutes.")
 		return
 	}
@@ -91,13 +97,19 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	}
 	u, err := s.store.UserByName(strings.TrimSpace(in.Username))
 	if err != nil {
-		auth.CheckDummy(in.Password)
-		s.loginLimit.Fail(ip)
+		if auth.TryCheckDummy(in.Password) {
+			writeErr(w, http.StatusServiceUnavailable, "The hub is busy. Try again in a moment.")
+			return
+		}
 		writeErr(w, http.StatusUnauthorized, "Invalid username or password")
 		return
 	}
-	if !auth.CheckPassword(in.Password, u.PasswordHash) {
-		s.loginLimit.Fail(ip)
+	match, busy := auth.TryCheckPassword(in.Password, u.PasswordHash)
+	if busy {
+		writeErr(w, http.StatusServiceUnavailable, "The hub is busy. Try again in a moment.")
+		return
+	}
+	if !match {
 		s.log.Warn("failed login", "user", u.Username, "ip", ip)
 		writeErr(w, http.StatusUnauthorized, "Invalid username or password")
 		return
@@ -123,13 +135,16 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 // loginTOTP completes a password login that is waiting for a 2FA code.
 func (s *Server) loginTOTP(w http.ResponseWriter, r *http.Request) {
 	ip := s.clientIP(r)
-	if s.loginLimit.Blocked(ip) {
-		writeErr(w, http.StatusTooManyRequests, "Too many attempts. Try again in a few minutes.")
-		return
-	}
 	se, err := s.currentSession(r)
 	if err != nil || !se.sess.MFAPending {
 		writeErr(w, http.StatusUnauthorized, "Sign-in expired, start again")
+		return
+	}
+	// Codes are limited per address and per account, so rotating addresses
+	// doesn't buy more guesses.
+	userKey := fmt.Sprintf("user:%d", se.user.ID)
+	if !s.loginLimit.Take(ip) || !s.loginLimit.Take(userKey) {
+		writeErr(w, http.StatusTooManyRequests, "Too many attempts. Try again in a few minutes.")
 		return
 	}
 	var in struct {
@@ -148,7 +163,13 @@ func (s *Server) loginTOTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if !valid {
-		s.loginLimit.Fail(ip)
+		// A sign-in gets a few codes; then the password has to be entered again.
+		if n, err := s.store.FailMFA(se.token); err != nil || n >= maxMFAFails {
+			s.store.DeleteSession(se.token)
+			s.clearCookie(w)
+			writeErr(w, http.StatusUnauthorized, "Sign-in expired, start again")
+			return
+		}
 		writeErr(w, http.StatusUnauthorized, "Invalid code")
 		return
 	}
@@ -157,6 +178,7 @@ func (s *Server) loginTOTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.loginLimit.Reset(ip)
+	s.loginLimit.Reset(userKey)
 	s.setCookie(w, se.token, sessionTTL)
 	ok(w)
 }
@@ -164,6 +186,7 @@ func (s *Server) loginTOTP(w http.ResponseWriter, r *http.Request) {
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	if c, err := r.Cookie(cookieName); err == nil {
 		s.store.DeleteSession(c.Value)
+		s.sessionsChanged.Add(1)
 	}
 	s.clearCookie(w)
 	ok(w)
@@ -196,6 +219,7 @@ func (s *Server) changePassword(w http.ResponseWriter, r *http.Request, se *sess
 		return
 	}
 	s.store.DeleteOtherSessions(se.user.ID, se.token)
+	s.sessionsChanged.Add(1)
 	ok(w)
 }
 
@@ -246,6 +270,7 @@ func (s *Server) totpEnable(w http.ResponseWriter, r *http.Request, se *session)
 	}
 	s.store.UseTOTPStep(se.user.ID, step)
 	s.store.DeleteOtherSessions(se.user.ID, se.token)
+	s.sessionsChanged.Add(1)
 	ok(w)
 }
 

@@ -187,6 +187,7 @@ export function EditServerModal({ server, open, onClose }: { server: Server; ope
   const [th, setTh] = useState<Thresholds>(server.thresholds);
   const [units, setUnits] = useState((server.thresholds.units ?? []).join(" "));
   const [channelIds, setChannelIds] = useState(server.channelIds);
+  const [probeLocation, setProbeLocation] = useState(server.probeLocation);
   const [error, setError] = useState("");
   const [install, setInstall] = useState<string | null>(null);
   const [confirm, setConfirm] = useState<"token" | "delete" | null>(null);
@@ -198,6 +199,7 @@ export function EditServerModal({ server, open, onClose }: { server: Server; ope
       setTh(server.thresholds);
       setUnits((server.thresholds.units ?? []).join(" "));
       setChannelIds(server.channelIds);
+      setProbeLocation(server.probeLocation);
       setInstall(null);
       setConfirm(null);
       setError("");
@@ -209,7 +211,7 @@ export function EditServerModal({ server, open, onClose }: { server: Server; ope
     qc.invalidateQueries({ queryKey: ["server", server.id] });
   };
   const save = useMutation({
-    mutationFn: () => api.put(`/servers/${server.id}`, { name, group, thresholds: { ...th, units: units.split(/[\s,]+/).filter(Boolean) }, channelIds }),
+    mutationFn: () => api.put(`/servers/${server.id}`, { name, group, thresholds: { ...th, units: units.split(/[\s,]+/).filter(Boolean) }, channelIds, probeLocation }),
     onSuccess: () => {
       toast("Server saved");
       refresh();
@@ -311,6 +313,18 @@ export function EditServerModal({ server, open, onClose }: { server: Server; ope
             </Field>
           </div>
           <p className="mt-2 text-xs text-fg-3">Each speed test uses up to about 350 MB, so on a metered plan prefer daily or weekly.</p>
+          <div className="mt-3">
+            <Toggle
+              checked={probeLocation}
+              onChange={setProbeLocation}
+              label="Confirm other monitors' failures from this server"
+              hint={
+                server.info?.probes
+                  ? "Its agent runs probes. It only re-checks public addresses, and never sees headers or credentials."
+                  : "Reinstall the agent with --probes first; until then this has no effect."
+              }
+            />
+          </div>
         </div>
 
         <div>

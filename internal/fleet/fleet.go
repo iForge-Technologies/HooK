@@ -31,6 +31,14 @@ const (
 	startupGrace     = 90 * time.Second // let agents reconnect after a hub restart
 	recoverHold      = time.Minute      // a breach must stay clear this long to resolve
 	hysteresis       = 5.0              // and drop this many points below the limit
+
+	// An agent sends about one frame per 5 s. Each server gets a frame budget
+	// that refills at frameRate per second and holds frameBurst, enough for an
+	// agent replaying its full backlog after an outage. A server that runs it
+	// dry is disconnected. The budget belongs to the server, not the
+	// connection, so reconnecting doesn't refill it.
+	frameRate  = 1.0
+	frameBurst = 1000.0
 )
 
 var metricKinds = []string{"cpu", "mem", "disk"}
@@ -46,6 +54,8 @@ type Fleet struct {
 	mu      sync.Mutex
 	conns   map[int64]*agentConn
 	live    map[int64]*live
+	revoked uint64                  // bumped by every Disconnect, so in-flight logins can tell
+	removed map[int64]bool          // deleted servers, never brought back by a late connection
 	pending map[string]pendingProbe // probe ID → waiting Probe call
 	speeds  map[string]chan proto.SpeedResult
 }
@@ -76,6 +86,14 @@ type live struct {
 	breach      map[string]*breach
 	running     map[string]bool // containers by name, from the last snapshot
 	restarts    map[string]int
+
+	frames   float64 // frame budget left (see frameRate)
+	framesAt time.Time
+
+	// Container and service alerts per window (see inspect).
+	budgetStart time.Time
+	budgetUsed  int
+	summarized  bool
 }
 
 type breach struct {
@@ -87,7 +105,7 @@ type breach struct {
 
 func New(st *store.Store, al *alert.Dispatcher, ev *events.Broker, log *slog.Logger) *Fleet {
 	return &Fleet{store: st, alerts: al, events: ev, log: log, started: time.Now(), now: time.Now,
-		conns: map[int64]*agentConn{}, live: map[int64]*live{}, pending: map[string]pendingProbe{},
+		conns: map[int64]*agentConn{}, live: map[int64]*live{}, removed: map[int64]bool{}, pending: map[string]pendingProbe{},
 		speeds: map[string]chan proto.SpeedResult{}}
 }
 
@@ -126,7 +144,7 @@ func (f *Fleet) Start() error {
 func (f *Fleet) state(h *store.Host) *live {
 	l, ok := f.live[h.ID]
 	if !ok {
-		l = &live{breach: map[string]*breach{}}
+		l = &live{breach: map[string]*breach{}, frames: frameBurst}
 		f.live[h.ID] = l
 	}
 	l.host = h
@@ -149,15 +167,21 @@ func (f *Fleet) SetHost(h *store.Host) {
 
 // Remove forgets a deleted host and drops its connection.
 func (f *Fleet) Remove(id int64) {
+	f.mu.Lock()
+	f.removed[id] = true
+	f.mu.Unlock()
 	f.Disconnect(id, "server deleted")
 	f.mu.Lock()
 	delete(f.live, id)
 	f.mu.Unlock()
 }
 
-// Disconnect closes a host's agent connection, telling the agent why.
+// Disconnect closes a host's agent connection, telling the agent why. Agents
+// still between their token check and registration are refused too (see
+// HandleWS), so a token rotation can't miss a connection that is just opening.
 func (f *Fleet) Disconnect(id int64, reason string) {
 	f.mu.Lock()
+	f.revoked++
 	c := f.conns[id]
 	delete(f.conns, id)
 	f.mu.Unlock()
@@ -191,6 +215,9 @@ func (f *Fleet) HandleWS(w http.ResponseWriter, r *http.Request, remoteIP string
 		http.Error(w, "missing agent token", http.StatusUnauthorized)
 		return
 	}
+	f.mu.Lock()
+	gen := f.revoked
+	f.mu.Unlock()
 	host, err := f.store.HostByToken(token)
 	if err != nil {
 		f.log.Warn("agent rejected: unknown token", "ip", remoteIP)
@@ -211,6 +238,13 @@ func (f *Fleet) HandleWS(w http.ResponseWriter, r *http.Request, remoteIP string
 	defer cancel()
 	c := &agentConn{ws: ws, cancel: cancel}
 	f.mu.Lock()
+	if f.revoked != gen || f.removed[host.ID] {
+		// A token was rotated or a server deleted while this one was checked:
+		// the check may be stale. A legitimate agent simply reconnects.
+		f.mu.Unlock()
+		ws.Close(websocket.StatusTryAgainLater, "agent tokens changed, reconnect")
+		return
+	}
 	old := f.conns[host.ID]
 	f.conns[host.ID] = c
 	f.state(host).lastSeen = time.Now() // a fresh connection is a sign of life
@@ -240,10 +274,34 @@ func (f *Fleet) HandleWS(w http.ResponseWriter, r *http.Request, remoteIP string
 			}
 			return
 		}
+		if !f.allowFrame(host.ID, time.Now()) {
+			f.log.Warn("agent disconnected: too many frames", "server", host.Name)
+			ws.Close(websocket.StatusPolicyViolation, "sending too fast")
+			return
+		}
 		if err := f.handle(host.ID, env, remoteIP); err != nil {
 			f.log.Warn("bad agent message", "server", host.Name, "type", env.Type, "err", err)
 		}
 	}
+}
+
+// allowFrame spends one frame of a server's budget.
+func (f *Fleet) allowFrame(id int64, now time.Time) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	l := f.live[id]
+	if l == nil {
+		return false
+	}
+	if !l.framesAt.IsZero() {
+		l.frames = min(frameBurst, l.frames+now.Sub(l.framesAt).Seconds()*frameRate)
+	}
+	l.framesAt = now
+	if l.frames < 1 {
+		return false
+	}
+	l.frames--
+	return true
 }
 
 func closeReason(err error) string {
@@ -284,10 +342,14 @@ func (f *Fleet) handle(id int64, env envelope, remoteIP string) error {
 		if err := json.Unmarshal(env.Data, &m); err != nil {
 			return err
 		}
-		ts := time.UnixMilli(m.TS)
-		if ts.After(now.Add(time.Minute)) || ts.Before(now.Add(-2*time.Hour)) {
-			m.TS, ts = now.UnixMilli(), now // agent clock is off; trust ours
+		sanitize(&m)
+		if t := time.UnixMilli(m.TS); t.After(now.Add(time.Minute)) || t.Before(now.Add(-2*time.Hour)) {
+			m.TS = now.UnixMilli() // agent clock is off; trust ours
 		}
+		// One raw row per server per second at most: the timestamp is the
+		// row's key, so finer timestamps would let an agent add rows at will.
+		m.TS = m.TS / 1000 * 1000
+		ts := time.UnixMilli(m.TS)
 		if m.NetRxBytes == 0 && m.NetTxBytes == 0 { // older agent: estimate from the rates
 			m.NetRxBytes, m.NetTxBytes = uint64(m.NetRx*Interval), uint64(m.NetTx*Interval)
 		}
@@ -321,7 +383,7 @@ func (f *Fleet) handle(id int64, env envelope, remoteIP string) error {
 		if err := json.Unmarshal(env.Data, &r); err != nil {
 			return err
 		}
-		f.deliver(r)
+		f.deliver(id, r)
 
 	case proto.TypeSpeedResult:
 		var r proto.SpeedResult
@@ -409,6 +471,33 @@ func (f *Fleet) sweep(now time.Time) {
 		}
 		f.events.Publish(events.Event{Type: "hosts"})
 	}
+}
+
+// maxValue caps every non-percentage metric: a petabyte, or a petabyte a second.
+const maxValue = 1e15
+
+// sanitize keeps an agent's numbers sane before they are stored or shown:
+// finite, not negative, percentages within 0–100. One hostile agent's values
+// end up in shared views (kiosk boards, the fleet list, rollups), and a
+// non-finite number there can't even be encoded as JSON.
+func sanitize(m *proto.Metrics) {
+	clamp := func(p *float64, hi float64) {
+		if math.IsNaN(*p) || *p < 0 {
+			*p = 0
+		} else if *p > hi { // also catches +Inf
+			*p = hi
+		}
+	}
+	for _, p := range []*float64{&m.CPU, &m.IOWait, &m.Steal, &m.DiskPct, &m.GPU, &m.GPUMem} {
+		clamp(p, 100)
+	}
+	for _, p := range []*float64{&m.Load1, &m.Load5, &m.Load15, &m.MemUsed, &m.MemTotal, &m.SwapUsed, &m.SwapTotal,
+		&m.DiskRead, &m.DiskWrite, &m.NetRx, &m.NetTx, &m.TCP, &m.Procs} {
+		clamp(p, maxValue)
+	}
+	m.MemUsed = min(m.MemUsed, m.MemTotal)
+	m.SwapUsed = min(m.SwapUsed, m.SwapTotal)
+	m.NetRxBytes, m.NetTxBytes = min(m.NetRxBytes, maxValue), min(m.NetTxBytes, maxValue)
 }
 
 func values(m *proto.Metrics) map[string]float64 {

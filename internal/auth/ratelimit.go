@@ -42,7 +42,26 @@ func (l *Limiter) Blocked(key string) bool {
 func (l *Limiter) Fail(key string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.record(key, time.Now())
+}
+
+// Take reserves an attempt before the work is done: it counts the attempt and
+// reports false when the key is already used up. Checking and counting in one
+// step stops concurrent requests from all slipping past Blocked. Call Reset
+// on success.
+func (l *Limiter) Take(key string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	now := time.Now()
+	if len(l.prune(key, now)) >= l.max {
+		return false
+	}
+	l.record(key, now)
+	return true
+}
+
+// record adds a hit. Caller holds l.mu.
+func (l *Limiter) record(key string, now time.Time) {
 	if len(l.hits) > 10_000 { // keep memory bounded under a spray of IPs
 		for k := range l.hits {
 			l.prune(k, now)

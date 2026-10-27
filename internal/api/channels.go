@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -25,17 +26,28 @@ func maskedChannel(c *store.Channel) *store.Channel {
 	return &out
 }
 
-// unmask restores secret fields the browser sent back as the mask.
-func unmask(cfg map[string]string, kind string, old *store.Channel) {
-	for _, f := range alert.Types[kind].Secret {
-		if cfg[f] == mask {
-			if old != nil && old.Type == kind {
-				cfg[f] = old.Config[f]
-			} else {
-				cfg[f] = ""
+// unmask restores secret fields the browser sent back as the mask. A stored
+// secret only goes where it was entered for: if a destination field changed,
+// it has to be typed in again, so a session holder can't redirect it to a
+// server of their own and read it there.
+func unmask(cfg map[string]string, kind string, old *store.Channel) error {
+	spec := alert.Types[kind]
+	for _, f := range spec.Secret {
+		if cfg[f] != mask {
+			continue
+		}
+		if old == nil || old.Type != kind {
+			cfg[f] = ""
+			continue
+		}
+		for _, d := range spec.Dest {
+			if strings.TrimSpace(cfg[d]) != old.Config[d] {
+				return fmt.Errorf("re-enter the %s: the %s changed", f, d)
 			}
 		}
+		cfg[f] = old.Config[f]
 	}
+	return nil
 }
 
 func cleanConfig(cfg map[string]string) map[string]string {
@@ -99,7 +111,10 @@ func (s *Server) saveChannel(w http.ResponseWriter, r *http.Request, se *session
 	if in.Config == nil {
 		in.Config = map[string]string{}
 	}
-	unmask(in.Config, in.Type, old)
+	if err := unmask(in.Config, in.Type, old); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	in.Config = cleanConfig(in.Config)
 	if err := alert.Validate(in.Type, in.Config); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
@@ -153,7 +168,10 @@ func (s *Server) testChannel(w http.ResponseWriter, r *http.Request, se *session
 	if in.Config == nil {
 		in.Config = map[string]string{}
 	}
-	unmask(in.Config, in.Type, old)
+	if err := unmask(in.Config, in.Type, old); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	in.Config = cleanConfig(in.Config)
 	if err := alert.Validate(in.Type, in.Config); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
