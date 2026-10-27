@@ -41,15 +41,21 @@ Keep the hub off the servers it watches. Then set `HOOK_DEADMAN_URL` (see [Opera
 
 ## Run with Docker
 
+The ready-made image on Docker Hub runs on x86 and ARM servers:
+
+```bash
+docker run -d --name hook -p 8080:8080 -v hook-data:/data fluxnat/hook
+```
+
+Or build it yourself:
+
 ```bash
 docker build -t hook .
 ```
 
-```bash
-docker run -d -p 8080:8080 -v hook-data:/data hook
-```
-
-Behind a TLS proxy, set `HOOK_PUBLIC_URL=https://…` and `HOOK_TRUST_PROXY=true`.
+- The image bundles the agent binaries, so **Add server** works out of the box.
+- It runs as an unprivileged user (uid 65532). A named volume like `hook-data` just works. A bind-mounted host folder must be writable by that user, for example after `chown 65532:65532 /srv/hook`.
+- Behind a TLS proxy, set `HOOK_PUBLIC_URL=https://…` and `HOOK_TRUST_PROXY=true`.
 
 ## Connect a server
 

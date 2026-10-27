@@ -59,7 +59,7 @@ Websites, APIs, databases, cron jobs and your VPS fleet: one Go binary with the 
 With Docker:
 
 ```bash
-docker build -t hook . && docker run -d -p 8080:8080 -v hook-data:/data hook
+docker run -d --name hook -p 8080:8080 -v hook-data:/data fluxnat/hook
 ```
 
 From source (Go 1.27+, Node 24+):
