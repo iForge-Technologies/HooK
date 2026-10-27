@@ -1,0 +1,38 @@
+# /etc/systemd/system/hook-hub.service
+# useradd --system --home /var/lib/hook --shell /usr/sbin/nologin hook
+# install -m 0755 bin/hub-linux-amd64 /usr/local/bin/hook-hub
+[Unit]
+Description=Hook monitoring hub
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=hook
+Group=hook
+ExecStart=/usr/local/bin/hook-hub
+Environment=HOOK_ADDR=127.0.0.1:8080
+Environment=HOOK_DATA=/var/lib/hook
+Environment=HOOK_PUBLIC_URL=https://hook.example.com
+Environment=HOOK_TRUST_PROXY=true
+StateDirectory=hook
+StateDirectoryMode=0700
+Restart=always
+RestartSec=3
+
+# hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+ReadWritePaths=/var/lib/hook
+MemoryMax=256M
+
+[Install]
+WantedBy=multi-user.target

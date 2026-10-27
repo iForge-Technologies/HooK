@@ -1,0 +1,16 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "hook-hub",
+      "runtimeExecutable": "bin/hub.exe",
+      "runtimeArgs": [],
+      "env": {
+        "HOOK_DATA": "./data-dev",
+        "HOOK_ADDR": "127.0.0.1:8080",
+        "HOOK_PUBLIC_URL": "http://127.0.0.1:8080"
+      },
+      "port": 8080
+    }
+  ]
+}

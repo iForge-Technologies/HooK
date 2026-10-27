@@ -1,0 +1,13 @@
+# build output
+/bin/
+/web/dist/*
+!/web/dist/.gitkeep
+/web/node_modules/
+
+# runtime data: database, encryption key, dev login
+/data/
+/data-dev/
+*.db
+*.db-wal
+*.db-shm
+secret.key

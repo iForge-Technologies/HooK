@@ -1,0 +1,20 @@
+# Continuous replication of Hook's database to S3-compatible storage.
+# /etc/litestream.yml — credentials come from /etc/hook/litestream.env.
+#
+# Litestream copies hook.db only. Back up the encryption key separately
+# (/var/lib/hook/secret.key, or your HOOK_SECRET value): without it, a restored
+# database can't decrypt channel tokens, connection strings or 2FA secrets.
+dbs:
+  - path: /var/lib/hook/hook.db
+    replicas:
+      - type: s3
+        bucket: my-hook-backups          # create it first, private
+        path: hook
+        # Cloudflare R2: endpoint below + region auto. AWS S3: drop endpoint, set your region.
+        endpoint: https://<account-id>.r2.cloudflarestorage.com
+        region: auto
+        access-key-id: ${LITESTREAM_ACCESS_KEY_ID}
+        secret-access-key: ${LITESTREAM_SECRET_ACCESS_KEY}
+        sync-interval: 10s               # how far behind the replica can be
+        snapshot-interval: 24h
+        retention: 168h                  # keep a week of point-in-time history

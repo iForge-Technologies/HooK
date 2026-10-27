@@ -1,0 +1,6 @@
+bin
+data
+data-dev
+web/node_modules
+web/dist
+.git

@@ -1,0 +1,5 @@
+# /etc/cron.d/hook-backup — nightly local snapshot in addition to (or instead of) Litestream.
+# Cron doesn't see the service's environment, so HOOK_DATA is set here.
+# Keeps 14 days. The key is copied too: move it somewhere safe, apart from the database.
+#   install -d -o hook -g hook -m 700 /var/backups/hook
+15 3 * * * hook HOOK_DATA=/var/lib/hook /usr/local/bin/hook-hub backup /var/backups/hook && find /var/backups/hook -name 'hook-*.db' -mtime +14 -delete

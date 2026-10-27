@@ -1,0 +1,185 @@
+@import "tailwindcss";
+@import "@fontsource-variable/geist";
+@import "@fontsource-variable/geist-mono";
+
+@custom-variant light (&:where(.light, .light *));
+
+/* Dark-first tokens. Status colours were checked with the dataviz validator:
+   the green/red pair differs in lightness so it survives deuteranopia, and
+   status always ships with an icon + label, never colour alone. */
+:root {
+  color-scheme: dark;
+  --bg: #000000;
+  --surface: #0c0c0e;
+  --surface-2: #141417;
+  --surface-3: #1d1d21;
+  --line: rgb(255 255 255 / 0.08);
+  --line-strong: rgb(255 255 255 / 0.15);
+  --fg: #f4f4f2;
+  --fg-2: rgb(255 255 255 / 0.62);
+  --fg-3: rgb(255 255 255 / 0.42);
+  --acc: #e8ff1f;
+  --acc-ink: #0b0b0c;
+  --up: #46e08a;
+  --down: #e0434a;
+  --warn: #f2a516;
+  --paused: #75757e;
+  --maint: #7b8cff;
+  --series: #3987e5;
+  /* categorical slots 1-5 (dataviz reference order), validated for the dark surface */
+  --cat-1: #3987e5;
+  --cat-2: #d95926;
+  --cat-3: #199e70;
+  --cat-4: #c98500;
+  --cat-5: #d55181;
+}
+
+.light {
+  color-scheme: light;
+  --bg: #f3f3f1;
+  --surface: #fcfcfb;
+  --surface-2: #f1f1ee;
+  --surface-3: #e7e7e3;
+  --line: rgb(0 0 0 / 0.08);
+  --line-strong: rgb(0 0 0 / 0.16);
+  --fg: #0b0b0c;
+  --fg-2: rgb(0 0 0 / 0.62);
+  --fg-3: rgb(0 0 0 / 0.46);
+  --acc: #0b0b0c;
+  --acc-ink: #ffffff;
+  --up: #16a34a;
+  --down: #b4232b;
+  --warn: #c98500;
+  --paused: #8a8a90;
+  --maint: #4b5bd6;
+  --series: #2a78d6;
+  --cat-1: #2a78d6;
+  --cat-2: #eb6834;
+  --cat-3: #1baf7a;
+  --cat-4: #eda100;
+  --cat-5: #e87ba4;
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-fg: var(--fg);
+  --color-fg-2: var(--fg-2);
+  --color-fg-3: var(--fg-3);
+  --color-acc: var(--acc);
+  --color-acc-ink: var(--acc-ink);
+  --color-up: var(--up);
+  --color-down: var(--down);
+  --color-warn: var(--warn);
+  --color-paused: var(--paused);
+  --color-maint: var(--maint);
+  --color-series: var(--series);
+  --font-sans: "Geist Variable", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-mono: "Geist Mono Variable", ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+html,
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  letter-spacing: -0.01em;
+}
+
+.tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+::selection {
+  background: color-mix(in oklab, var(--series) 40%, transparent);
+}
+
+/* Gradient hero cards, after the finance bento. */
+.hero-card {
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
+  color: #fff;
+}
+.hero-card::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -2;
+  background: linear-gradient(180deg, var(--g-top) 0%, var(--g-base) 38%, var(--g-base) 72%, var(--g-bottom) 100%);
+}
+.hero-card::after {
+  content: "";
+  position: absolute;
+  left: 8%;
+  right: 8%;
+  top: 22%;
+  bottom: -10%;
+  z-index: -1;
+  border-radius: 90px;
+  background: var(--g-core);
+  filter: blur(56px);
+}
+.hero-ok {
+  --g-top: #b9a6ff;
+  --g-base: #2e43ff;
+  --g-bottom: #6d7dff;
+  --g-core: #05082a;
+}
+.hero-bad {
+  --g-top: #ffb3b8;
+  --g-base: #d4202c;
+  --g-bottom: #ff6a72;
+  --g-core: #2a0306;
+}
+.hero-idle {
+  --g-top: #9a9aa8;
+  --g-base: #3a3a44;
+  --g-bottom: #55555f;
+  --g-core: #060608;
+}
+
+/* The rest of the finance bento's card gradients. */
+.g-blue { --g-top: #b9a6ff; --g-base: #2e43ff; --g-bottom: #6d7dff; --g-core: #05082a; }
+.g-graph { --g-top: #9a9aa8; --g-base: #3a3a44; --g-bottom: #55555f; --g-core: #060608; }
+.g-pink { --g-top: #ffb3d6; --g-base: #ff2a85; --g-bottom: #ff6aa8; --g-core: #3a031c; }
+.g-copper { --g-top: #f6bf96; --g-base: #c2683a; --g-bottom: #dc8a5c; --g-core: #1d0b05; }
+.g-green { --g-top: #a6e8c8; --g-base: #36956f; --g-bottom: #58b58c; --g-core: #061d15; }
+.g-lime { --g-top: #f4ffb8; --g-base: #a3c400; --g-bottom: #c9e03a; --g-core: #121700; color: #0b0b0c; }
+/* inner highlight rim */
+.rim {
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.2), inset 0 0 0 1px rgb(255 255 255 / 0.06);
+}
+
+.enter {
+  animation: enter 0.6s cubic-bezier(0.32, 0.72, 0, 1) both;
+}
+@keyframes enter {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.99);
+  }
+}
+.pulse-dot {
+  animation: pulse 2s ease-out infinite;
+}
+@keyframes pulse {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in oklab, currentColor 55%, transparent);
+  }
+  70%,
+  100% {
+    box-shadow: 0 0 0 7px transparent;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .enter,
+  .pulse-dot {
+    animation: none;
+  }
+}

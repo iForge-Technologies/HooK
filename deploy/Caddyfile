@@ -1,0 +1,8 @@
+# Caddy gets and renews the TLS certificate automatically.
+hook.example.com {
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:8080 {
+		# keep the live event stream unbuffered
+		flush_interval -1
+	}
+}
