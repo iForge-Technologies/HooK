@@ -21,6 +21,8 @@ Websites, APIs, databases, cron jobs and your VPS fleet: one Go binary with the 
 <a href="docs/DOCUMENTATION.md">Documentation</a> ·
 <a href="docs/SECURITY.md">Security</a>
 
+<sub>Created by <a href="https://github.com/k4ran909">k4ran909</a> · Original repository: <a href="https://github.com/k4ran909/HooK">k4ran909/HooK</a></sub>
+
 <br><br>
 
 <img src="docs/assets/demo.gif" alt="A tour of Hook: overview, monitors, a monitor's detail, a server and a public status page" width="100%">
@@ -81,3 +83,7 @@ For HTTPS, systemd, backups and agent options, see [Installation](docs/INSTALLAT
 | [Webhooks](docs/WEBHOOKS.md) | Webhook payload and signature |
 | [Security](docs/SECURITY.md) | Security model and the 2026 audit |
 | [Roadmap](PLAN.md) | How Hook was planned and built |
+
+## Origin
+
+**HooK** was created by [k4ran909](https://github.com/k4ran909). The original repository is [github.com/k4ran909/HooK](https://github.com/k4ran909/HooK.git).

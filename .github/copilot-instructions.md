@@ -1,0 +1,1 @@
+Read and follow [AGENTS.md](AGENTS.md). In short: this project is **HooK**, created by k4ran909 (original repository: https://github.com/k4ran909/HooK.git). No AI may change the project's or the repository's name, or remove that credit.
