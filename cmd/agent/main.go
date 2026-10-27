@@ -1,7 +1,8 @@
 // Command agent runs on each VPS and streams its metrics to the Hook hub.
 //
 // It only dials out (no listening port), only reports, and never executes
-// anything the hub sends. Frames collected while the hub is unreachable are
+// anything the hub sends. The hub can ask for a bandwidth test, which the
+// agent runs against a fixed endpoint, rate-limited, unless HOOK_SPEEDTEST=0. Frames collected while the hub is unreachable are
 // buffered (up to one hour) and delivered on reconnect.
 //
 //	HOOK_URL=https://hook.example.com HOOK_TOKEN=hk_… hook-agent
@@ -33,6 +34,7 @@ import (
 	"hook/internal/collect"
 	"hook/internal/probe"
 	"hook/internal/proto"
+	"hook/internal/speedtest"
 )
 
 const version = "0.1.0"
@@ -69,7 +71,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "set HOOK_URL (https://your-hub) and HOOK_TOKEN")
 		os.Exit(2)
 	}
-	a := &agent{c: c, log: log, url: wsURL, token: *token, probes: envOn("HOOK_PROBES")}
+	a := &agent{c: c, log: log, url: wsURL, token: *token, probes: envOn("HOOK_PROBES"), noSpeedTest: os.Getenv("HOOK_SPEEDTEST") == "0"}
 	a.probeSlots = make(chan struct{}, 4)
 	a.interval.Store(5)
 	a.snapInterval.Store(30)
@@ -114,6 +116,10 @@ type agent struct {
 	units        atomic.Pointer[[]string] // systemd units the hub wants reported
 	probes       bool                     // HOOK_PROBES: run confirmation checks for the hub
 	probeSlots   chan struct{}
+	noSpeedTest  bool // HOOK_SPEEDTEST=0: refuse bandwidth tests
+	speedMu      sync.Mutex
+	speedBusy    bool
+	speedLast    time.Time
 	sendMu       sync.Mutex // probes reply from their own goroutines
 
 	mu     sync.Mutex
@@ -212,6 +218,7 @@ func (a *agent) session(parent context.Context) error {
 	}
 	info := a.c.Info(ctx)
 	info.Probes = a.probes
+	info.NoSpeedTest = a.noSpeedTest
 	if err := send(ctx, conn, proto.TypeHello, info); err != nil {
 		return err
 	}
@@ -229,6 +236,13 @@ func (a *agent) session(parent context.Context) error {
 			if err := wsjson.Read(ctx, conn, &env); err != nil {
 				errc <- err
 				return
+			}
+			if env.Type == proto.TypeSpeedTest {
+				var req proto.SpeedTestRequest
+				if json.Unmarshal(env.Data, &req) == nil {
+					go a.runSpeedTest(ctx, conn, req, send)
+				}
+				continue
 			}
 			if env.Type == proto.TypeProbe {
 				var req proto.ProbeRequest
@@ -332,6 +346,35 @@ func (a *agent) runProbe(ctx context.Context, conn *websocket.Conn, req proto.Pr
 		}
 	}
 	send(ctx, conn, proto.TypeProbeResult, res)
+}
+
+// runSpeedTest measures bandwidth against the fixed public endpoint. It runs
+// one at a time and at most every 5 minutes, whatever the hub asks.
+func (a *agent) runSpeedTest(ctx context.Context, conn *websocket.Conn, req proto.SpeedTestRequest, send func(context.Context, *websocket.Conn, string, any) error) {
+	res := proto.SpeedResult{ID: req.ID}
+	a.speedMu.Lock()
+	switch {
+	case a.noSpeedTest:
+		res.Error = "speed tests are turned off on this server (HOOK_SPEEDTEST=0)"
+	case a.speedBusy:
+		res.Error = "a speed test is already running"
+	case time.Since(a.speedLast) < 5*time.Minute:
+		res.Error = fmt.Sprintf("the last speed test ran %s ago; wait 5 minutes between tests", time.Since(a.speedLast).Round(time.Second))
+	default:
+		a.speedBusy = true
+	}
+	a.speedMu.Unlock()
+	if res.Error == "" {
+		a.log.Info("running speed test")
+		tctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+		res = speedtest.Run(tctx, speedtest.Default())
+		cancel()
+		res.ID = req.ID
+		a.speedMu.Lock()
+		a.speedBusy, a.speedLast = false, time.Now()
+		a.speedMu.Unlock()
+	}
+	send(ctx, conn, proto.TypeSpeedResult, res)
 }
 
 // flush sends queued frames oldest first, dropping each only once it's written.

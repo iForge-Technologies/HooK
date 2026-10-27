@@ -95,6 +95,7 @@ func run(log *slog.Logger) error {
 	}
 	go fl.Run(ctx)
 	go fl.RunForecasts(ctx)
+	go fl.RunSpeedTests(ctx)
 	sched := monitor.New(st, alerts, broker, fl, cal, log)
 	if err := sched.Start(ctx); err != nil {
 		return err

@@ -3,7 +3,7 @@ import { useEffect, useState, type FormEvent } from "react";
 import { Link, useLocation } from "wouter";
 import { Modal, useToast } from "../components/overlay";
 import { StatusIcon } from "../components/status";
-import { Button, ErrorNote, Field, Input, Spinner, Toggle } from "../components/ui";
+import { Button, ErrorNote, Field, Input, Select, Spinner, Toggle } from "../components/ui";
 import { api, type Channel, type Server, type Thresholds } from "../lib/api";
 
 /** Install command block with a copy button. */
@@ -237,7 +237,7 @@ export function EditServerModal({ server, open, onClose }: { server: Server; ope
     onError: (e) => setError((e as Error).message),
   });
 
-  const num = (k: "cpu" | "mem" | "disk" | "minutes") => (e: React.ChangeEvent<HTMLInputElement>) => setTh({ ...th, [k]: Number(e.target.value) });
+  const num = (k: "cpu" | "mem" | "disk" | "minutes" | "trafficQuotaGb" | "trafficResetDay") => (e: React.ChangeEvent<HTMLInputElement>) => setTh({ ...th, [k]: Number(e.target.value) });
 
   return (
     <Modal open={open} onClose={onClose} title={`Edit ${server.name}`} width="max-w-2xl">
@@ -289,6 +289,28 @@ export function EditServerModal({ server, open, onClose }: { server: Server; ope
           <div className="mt-3">
             <Toggle checked={th.services} onChange={(v) => setTh({ ...th, services: v })} label="Alert when a watched service stops" />
           </div>
+        </div>
+
+        <div>
+          <div className="mb-2 text-[13px] font-medium text-fg-2">Network</div>
+          <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
+            <Field label="Monthly allowance (GB)" htmlFor="es-quota" hint="0 = none">
+              <Input id="es-quota" type="number" min={0} step="any" value={th.trafficQuotaGb ?? 0} onChange={num("trafficQuotaGb")} />
+            </Field>
+            <Field label="Resets on day" htmlFor="es-reset" hint="Of each month, UTC">
+              <Input id="es-reset" type="number" min={1} max={28} value={th.trafficResetDay || 1} onChange={num("trafficResetDay")} />
+            </Field>
+            <Field label="Automatic speed test" htmlFor="es-speed">
+              <Select id="es-speed" value={th.speedTestHours ?? 0} onChange={(e) => setTh({ ...th, speedTestHours: Number(e.target.value) })}>
+                <option value={0}>Off</option>
+                <option value={6}>Every 6 hours</option>
+                <option value={12}>Every 12 hours</option>
+                <option value={24}>Daily</option>
+                <option value={168}>Weekly</option>
+              </Select>
+            </Field>
+          </div>
+          <p className="mt-2 text-xs text-fg-3">Each speed test uses up to about 350 MB, so on a metered plan prefer daily or weekly.</p>
         </div>
 
         <div>

@@ -42,7 +42,10 @@ type Collector struct {
 	lastTopCPU []proto.Proc
 	docker     *dockerClient
 	dockerCPU  map[string]cpuSample
+	dockerIO   map[string]ioSample
+	dockerDF   dfCache
 	bootTime   time.Time
+	gpu        gpuReader
 
 	mu      sync.Mutex
 	diskPct float64 // fullest mount, refreshed by Snapshot
@@ -170,6 +173,9 @@ func (c *Collector) Metrics(ctx context.Context) proto.Metrics {
 				tx += n.BytesSent
 			}
 		}
+		if p := c.prevNet; !p.at.IsZero() && rx >= p.in && tx >= p.out {
+			m.NetRxBytes, m.NetTxBytes = rx-p.in, tx-p.out
+		}
 		m.NetRx, m.NetTx = rate(&c.prevNet, rx, tx, now)
 	}
 	if pc, err := net.ProtoCountersWithContext(ctx, []string{"tcp"}); err == nil && len(pc) > 0 {
@@ -179,6 +185,9 @@ func (c *Collector) Metrics(ctx context.Context) proto.Metrics {
 		m.Procs = float64(misc.ProcsTotal)
 	} else if pids, err := process.PidsWithContext(ctx); err == nil {
 		m.Procs = float64(len(pids))
+	}
+	if c.hasGPU() {
+		m.GPU, m.GPUMem = gpuSummary(c.gpus(ctx, false))
 	}
 	c.mu.Lock()
 	m.DiskPct = c.diskPct
@@ -234,6 +243,7 @@ func (c *Collector) Snapshot(ctx context.Context, watch []string) proto.Snapshot
 		}
 	}
 	s.Docker = c.containers(ctx)
+	s.GPU = c.gpus(ctx, true)
 	s.Units = units(ctx, watch, c.bootTime)
 	s.FailedUnits = failedUnits(ctx)
 
@@ -259,12 +269,30 @@ func (c *Collector) Snapshot(ctx context.Context, watch []string) proto.Snapshot
 	if nics, err := net.IOCountersWithContext(ctx, true); err == nil {
 		dt := now.Sub(c.prevIfAt).Seconds()
 		next := map[string]net.IOCountersStat{}
+		details := map[string]net.InterfaceStat{}
+		if ifs, err := net.InterfacesWithContext(ctx); err == nil {
+			for _, i := range ifs {
+				details[i.Name] = i
+			}
+		}
 		for _, n := range nics {
 			next[n.Name] = n
 			if !realIface(n.Name) || (n.BytesRecv == 0 && n.BytesSent == 0) {
 				continue
 			}
-			f := proto.Iface{Name: n.Name, RxErr: n.Errin, TxErr: n.Errout, Drops: n.Dropin + n.Dropout}
+			f := proto.Iface{Name: n.Name, RxErr: n.Errin, TxErr: n.Errout, Drops: n.Dropin + n.Dropout,
+				RxTotal: n.BytesRecv, TxTotal: n.BytesSent, Addrs: []string{}}
+			if d, ok := details[n.Name]; ok {
+				f.MTU, f.Up = d.MTU, slices.Contains(d.Flags, "up")
+				for _, a := range d.Addrs {
+					if !strings.HasPrefix(a.Addr, "fe80:") { // link-local says nothing useful
+						f.Addrs = append(f.Addrs, a.Addr)
+					}
+				}
+			}
+			if v, ok := readNum("/sys/class/net/" + n.Name + "/speed"); ok && v > 0 {
+				f.Speed = int(v)
+			}
 			if p, ok := c.prevIf[n.Name]; ok && dt > 0 && n.BytesRecv >= p.BytesRecv && n.BytesSent >= p.BytesSent {
 				f.Rx, f.Tx = float64(n.BytesRecv-p.BytesRecv)/dt, float64(n.BytesSent-p.BytesSent)/dt
 			}

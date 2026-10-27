@@ -130,6 +130,26 @@ Live numbers (status counts, server metrics) update through the event stream; hi
   - Matching "back online" and "back to normal" messages. An alert only clears once the value has stayed 5 points below the limit for a minute, so a value hovering at the limit doesn't send repeated alerts.
 - **Charts:** 1h, 6h, 24h, 7d and 30d. Raw data is kept 48 hours, per-minute summaries 14 days and hourly summaries 2 years. Summaries also keep the peak inside each bucket.
 
+### GPU, network and Docker detail
+
+- **GPU:** the agent reads NVIDIA cards with `nvidia-smi`, and AMD and Intel cards from sysfs.
+  - Shown per device: utilisation, VRAM, temperature, power against its limit, fan, clock and driver, plus which processes use the GPU.
+  - GPU utilisation and memory are charted with the other metrics.
+  - A server without a GPU says **No GPU**. Virtual display adapters (virtio, QXL, VMware, server BMC graphics) don't count as GPUs. An NVIDIA card without its driver is reported as such.
+- **Traffic:** the agent reports the exact bytes moved on real interfaces each frame, and the hub keeps daily totals (replayed frames are never counted twice).
+  - The server page shows this billing cycle's in, out and total, plus 30 days of daily bars.
+  - Under **Edit & alerts**, set the provider's monthly allowance and reset day to see usage against it and a projection to the end of the cycle.
+- **Interfaces:** link state, addresses, link speed (when the driver reports one), MTU, current rates, totals since boot and errors.
+- **Speed tests:** **Run speed test** on a server page measures that server's own connection: download, upload, latency and jitter.
+  - Tests run against Cloudflare's speed test endpoints. The endpoint is fixed in the agent; the hub can only ask for a test, never choose where traffic goes.
+  - Each test is capped at about 8 seconds and 250 MB per direction. The agent refuses a second test within 5 minutes.
+  - Optional automatic tests run every 6, 12 or 24 hours, or weekly. Set `HOOK_SPEEDTEST=0` on a server to turn tests off there.
+- **Docker:** besides state, health, CPU, memory and restarts, each container shows:
+  - Network and disk I/O rates and process count.
+  - Uptime, published ports, networks, mounts and the size of its writable layer. Click a row to expand it.
+  - The card also lists **images** (size, age, how many containers use each, dangling ones flagged) and **volumes** (size, which containers mount each, unused and anonymous ones flagged).
+  - Totals cover images, container layers, volumes, build cache and roughly how much `docker system prune` could reclaim. These sizes come from `docker system df`, which the agent refreshes every 5 minutes in the background.
+
 ## Run locally
 
 Requires Go 1.27+ and Node 24+.
@@ -188,7 +208,7 @@ To make the server a **probe location** for multi-location confirmation, add `--
 curl -fsSL https://your-hub/install.sh | sudo sh -s -- --url https://your-hub --token hk_... --docker-host tcp://127.0.0.1:2375
 ```
 
-The command above points the agent at a read-only socket proxy (recommended), for example `tecnativa/docker-socket-proxy` with `CONTAINERS=1`. The alternative below adds the agent to the `docker` group, which is root-equivalent:
+The command above points the agent at a read-only socket proxy (recommended), for example `tecnativa/docker-socket-proxy` with `CONTAINERS=1 IMAGES=1 VOLUMES=1 SYSTEM=1` (all read-only; the last three add images, volumes and disk usage). The alternative below adds the agent to the `docker` group, which is root-equivalent:
 
 ```bash
 curl -fsSL https://your-hub/install.sh | sudo sh -s -- --url https://your-hub --token hk_... --docker
@@ -217,6 +237,7 @@ Keep the hub off the servers it watches, and set `HOOK_DEADMAN_URL` so you hear 
 | `HOOK_DEADMAN_URL` | — | Heartbeat URL pinged while the hub is healthy |
 | `HOOK_DEADMAN_FAIL_URL` | — | Pinged instead when the hub is running but unhealthy (for example `<url>/fail` on Healthchecks.io) |
 | `HOOK_DEADMAN_EVERY` | `60` | Seconds between pings |
+| `HOOK_SPEEDTEST` (agent) | on | `0` makes the agent refuse speed tests |
 | `HOOK_PUSH_CONTACT` | `HOOK_PUBLIC_URL` | Email address or https URL that push services (Apple, Google, Mozilla) can use to reach you |
 
 ## Backups and restore

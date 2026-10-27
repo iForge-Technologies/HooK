@@ -13,6 +13,7 @@ import (
 
 	"hook/internal/collect"
 	"hook/internal/events"
+	"hook/internal/fleet"
 	"hook/internal/forecast"
 	"hook/internal/proto"
 	"hook/internal/store"
@@ -181,6 +182,13 @@ func (in *serverInput) validate() error {
 			return errors.New("watch at most 30 units per server")
 		}
 		t.Units = units
+		if t.TrafficQuotaGB < 0 || t.TrafficQuotaGB > 1e6 {
+			return errors.New("the traffic allowance must be between 0 (none) and 1,000,000 GB")
+		}
+		t.TrafficResetDay = max(1, min(28, t.TrafficResetDay))
+		if !slices.Contains([]int{0, 6, 12, 24, 168}, t.SpeedTestHours) {
+			return errors.New("automatic speed tests run every 6, 12, 24 or 168 hours, or never (0)")
+		}
 	}
 	if in.ChannelIDs == nil {
 		in.ChannelIDs = []int64{}
@@ -326,4 +334,57 @@ func (s *Server) serveAgent(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Disposition", `attachment; filename="`+name+`"`)
 	http.ServeFile(w, r, path)
+}
+
+// serverNetwork is the network panel: daily traffic, the current billing
+// cycle against the quota, and speed test history.
+func (s *Server) serverNetwork(w http.ResponseWriter, r *http.Request, se *session) {
+	h, found := s.loadHost(w, r)
+	if !found {
+		return
+	}
+	now := time.Now()
+	th := h.Thresholds
+	cycle := store.CycleStart(now, th.TrafficResetDay)
+	from := min(cycle.UnixMilli(), now.AddDate(0, 0, -30).UnixMilli())
+	days, err := s.store.Traffic(h.ID, from)
+	if err != nil {
+		s.internal(w, err)
+		return
+	}
+	var rx, tx float64
+	for _, d := range days {
+		if d.Day >= cycle.UnixMilli() {
+			rx, tx = rx+d.Rx, tx+d.Tx
+		}
+	}
+	tests, err := s.store.SpeedTests(h.ID, 30)
+	if err != nil {
+		s.internal(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"days":             days,
+		"cycle":            map[string]any{"start": cycle.UnixMilli(), "end": cycle.AddDate(0, 1, 0).UnixMilli(), "rx": rx, "tx": tx, "quotaGb": th.TrafficQuotaGB},
+		"speedTests":       tests,
+		"speedTestHours":   th.SpeedTestHours,
+		"speedTestEnabled": !h.Info.NoSpeedTest,
+	})
+}
+
+func (s *Server) runSpeedTest(w http.ResponseWriter, r *http.Request, se *session) {
+	h, found := s.loadHost(w, r)
+	if !found {
+		return
+	}
+	t, err := s.fleet.SpeedTest(r.Context(), h.ID, false)
+	if err != nil {
+		code := http.StatusBadGateway
+		if errors.Is(err, fleet.ErrNotConnected) {
+			code = http.StatusConflict
+		}
+		writeErr(w, code, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, t)
 }

@@ -124,6 +124,8 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("DELETE /api/servers/{id}", s.authed(s.deleteServer))
 	mux.Handle("POST /api/servers/{id}/token", s.authed(s.rotateToken))
 	mux.Handle("GET /api/servers/{id}/series", s.authed(s.serverSeries))
+	mux.Handle("GET /api/servers/{id}/network", s.authed(s.serverNetwork))
+	mux.Handle("POST /api/servers/{id}/speedtest", s.authed(s.runSpeedTest))
 
 	// Agents authenticate with their own token, not a session.
 	mux.HandleFunc("GET /api/agent/ws", s.agentWS)

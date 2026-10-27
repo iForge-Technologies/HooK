@@ -47,6 +47,7 @@ type Fleet struct {
 	conns   map[int64]*agentConn
 	live    map[int64]*live
 	pending map[string]pendingProbe // probe ID → waiting Probe call
+	speeds  map[string]chan proto.SpeedResult
 }
 
 type agentConn struct {
@@ -86,7 +87,8 @@ type breach struct {
 
 func New(st *store.Store, al *alert.Dispatcher, ev *events.Broker, log *slog.Logger) *Fleet {
 	return &Fleet{store: st, alerts: al, events: ev, log: log, started: time.Now(), now: time.Now,
-		conns: map[int64]*agentConn{}, live: map[int64]*live{}, pending: map[string]pendingProbe{}}
+		conns: map[int64]*agentConn{}, live: map[int64]*live{}, pending: map[string]pendingProbe{},
+		speeds: map[string]chan proto.SpeedResult{}}
 }
 
 // Start restores state from the database: hosts, last metrics and open alerts.
@@ -286,6 +288,9 @@ func (f *Fleet) handle(id int64, env envelope, remoteIP string) error {
 		if ts.After(now.Add(time.Minute)) || ts.Before(now.Add(-2*time.Hour)) {
 			m.TS, ts = now.UnixMilli(), now // agent clock is off; trust ours
 		}
+		if m.NetRxBytes == 0 && m.NetTxBytes == 0 { // older agent: estimate from the rates
+			m.NetRxBytes, m.NetTxBytes = uint64(m.NetRx*Interval), uint64(m.NetTx*Interval)
+		}
 		if err := f.store.InsertMetrics(id, &m); err != nil {
 			return err
 		}
@@ -317,6 +322,13 @@ func (f *Fleet) handle(id int64, env envelope, remoteIP string) error {
 			return err
 		}
 		f.deliver(r)
+
+	case proto.TypeSpeedResult:
+		var r proto.SpeedResult
+		if err := json.Unmarshal(env.Data, &r); err != nil {
+			return err
+		}
+		f.deliverSpeed(r)
 
 	case proto.TypeSnapshot:
 		var s proto.Snapshot

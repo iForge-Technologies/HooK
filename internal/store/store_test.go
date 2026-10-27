@@ -261,3 +261,36 @@ func TestKioskLinks(t *testing.T) {
 		t.Fatalf("a revoked link must stop working: %v", err)
 	}
 }
+
+func TestTrafficCountsEachFrameOnce(t *testing.T) {
+	s := open(t)
+	h := &Host{Name: "web", Thresholds: DefaultThresholds()}
+	if err := s.CreateHost(h, "tok-web"); err != nil {
+		t.Fatal(err)
+	}
+	day := time.Date(2026, 10, 27, 0, 0, 0, 0, time.UTC).UnixMilli()
+	frame := &proto.Metrics{TS: day + 1000, NetRxBytes: 1000, NetTxBytes: 200, GPU: 40, GPUMem: 12.5}
+	if err := s.InsertMetrics(h.ID, frame); err != nil {
+		t.Fatal(err)
+	}
+	s.InsertMetrics(h.ID, frame) // replayed after a reconnect
+	s.InsertMetrics(h.ID, &proto.Metrics{TS: day + 6000, NetRxBytes: 500, NetTxBytes: 100})
+	days, err := s.Traffic(h.ID, day)
+	if err != nil || len(days) != 1 || days[0].Rx != 1500 || days[0].Tx != 300 {
+		t.Fatalf("traffic = %+v, %v", days, err)
+	}
+	pts, _ := s.HostSeries(h.ID, day, "raw")
+	if len(pts) != 2 || pts[0].GPU != 40 || pts[0].GPUMem != 12.5 {
+		t.Fatalf("gpu not stored: %+v", pts)
+	}
+}
+
+func TestCycleStart(t *testing.T) {
+	at := time.Date(2026, 3, 10, 15, 0, 0, 0, time.UTC)
+	if got := CycleStart(at, 15); !got.Equal(time.Date(2026, 2, 15, 0, 0, 0, 0, time.UTC)) {
+		t.Fatalf("before reset day: %v", got)
+	}
+	if got := CycleStart(at, 0); !got.Equal(time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)) {
+		t.Fatalf("default reset day: %v", got)
+	}
+}

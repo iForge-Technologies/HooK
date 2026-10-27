@@ -8,7 +8,9 @@ import { api, type HostEvent, type MetricPoint, type Proc, type ServerDetail, ty
 import { fmtAgo, fmtBytes, fmtDateTime, fmtDuration, fmtPct, fmtRate, fmtUptimeSecs, memPct } from "../lib/format";
 import { useNow } from "../lib/hooks";
 import { EditServerModal, InstallCommand } from "./ServerModals";
-import { ContainersCard, ServicesCard } from "../components/server-panels";
+import { DockerCard, ServicesCard } from "../components/server-panels";
+import { GPUCard } from "../components/server-gpu";
+import { InterfacesCard, NetworkPanels } from "../components/server-network";
 import { ForecastCard } from "../components/forecast-card";
 
 type Range = "1h" | "6h" | "24h" | "7d" | "30d";
@@ -35,6 +37,10 @@ const LOAD: SeriesDef[] = [
   { label: "15 min", color: C3, get: (p) => p.load15 },
 ];
 const DISK: SeriesDef[] = [{ label: "Fullest mount", color: C1, get: (p) => p.diskPct }];
+const GPU: SeriesDef[] = [
+  { label: "Utilisation", color: C1, get: (p) => p.gpu ?? 0, peak: (p) => p.gpuMax },
+  { label: "Memory", color: C2, get: (p) => p.gpuMem ?? 0 },
+];
 const NET_IN: SeriesDef = { label: "In", color: C1, get: (p) => p.netRx, peak: (p) => p.netRxMax };
 const NET_OUT: SeriesDef = { label: "Out", color: C2, get: (p) => p.netTx, peak: (p) => p.netTxMax };
 const IO_R: SeriesDef = { label: "Read", color: C1, get: (p) => p.diskRead, peak: (p) => p.diskReadMax };
@@ -65,6 +71,7 @@ export function ServerDetailPage({ id }: { id: number }) {
   });
   const points = series.data?.points ?? [];
   const hasSwap = useMemo(() => points.some((p) => p.swapTotal > 0), [points]);
+  const gpuHistory = useMemo(() => points.some((p) => (p.gpu ?? 0) > 0 || (p.gpuMem ?? 0) > 0), [points]);
 
   if (q.isPending) {
     return (
@@ -91,6 +98,7 @@ export function ServerDetailPage({ id }: { id: number }) {
   const info = s.info;
   const th = s.thresholds;
   const fresh = s.status === "online";
+  const hasGPU = !!snap?.gpu?.present;
 
   return (
     <div className="flex flex-col gap-4 sm:gap-5">
@@ -165,13 +173,14 @@ export function ServerDetailPage({ id }: { id: number }) {
           )}
 
           {/* live tiles */}
-          <div className={`grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6 ${fresh ? "" : "opacity-60"}`}>
+          <div className={`grid grid-cols-2 gap-3 sm:grid-cols-3 ${hasGPU ? "lg:grid-cols-7" : "lg:grid-cols-6"} ${fresh ? "" : "opacity-60"}`}>
             <GaugeTile label="CPU" value={m?.cpu ?? null} limit={th.cpu} display={fmtPct(m?.cpu)} sub={m ? `iowait ${fmtPct(m.iowait)} · steal ${fmtPct(m.steal)}` : ""} />
             <GaugeTile label="Memory" value={m ? memPct(m) : null} limit={th.mem} display={m ? fmtPct(memPct(m)) : "—"} sub={m ? `${fmtBytes(m.memUsed)} of ${fmtBytes(m.memTotal)}` : ""} />
             <GaugeTile label="Disk" value={m?.diskPct ?? null} limit={th.disk} display={fmtPct(m?.diskPct)} sub="fullest mount" />
             <Stat label="Load" value={m ? m.load1.toFixed(2) : "—"} sub={m ? `${m.load5.toFixed(2)} · ${m.load15.toFixed(2)} · ${info.cores} cores` : ""} />
             <Stat label="Network" value={m ? `↓ ${fmtRate(m.netRx)}` : "—"} sub={m ? `↑ ${fmtRate(m.netTx)}` : ""} />
             <Stat label="TCP · procs" value={m ? `${Math.round(m.tcp)}` : "—"} sub={m ? `${Math.round(m.procs)} processes` : ""} />
+            {hasGPU && <GaugeTile label="GPU" value={m?.gpu ?? null} limit={0} display={fmtPct(m?.gpu)} sub={m ? `memory ${fmtPct(m.gpuMem)}` : ""} />}
           </div>
 
           <div className="flex flex-wrap items-center justify-between gap-3">
@@ -202,6 +211,11 @@ export function ServerDetailPage({ id }: { id: number }) {
               <ChartCard title="Disk I/O">
                 <MirrorChart points={points} up={IO_R} down={IO_W} fmt={fmtRate} />
               </ChartCard>
+              {(hasGPU || gpuHistory) && (
+                <ChartCard title="GPU">
+                  <TimeChart points={points} series={GPU} fmt={pct} yMax={100} />
+                </ChartCard>
+              )}
             </div>
           )}
           {series.data && series.data.resolution !== "raw" && (
@@ -209,6 +223,12 @@ export function ServerDetailPage({ id }: { id: number }) {
           )}
 
           {forecast && <ForecastCard forecast={forecast} />}
+
+          <h2 className="-mb-1 text-[15px] font-semibold tracking-[-0.02em]">Network</h2>
+          <div className="grid gap-4 sm:gap-5 lg:grid-cols-2">
+            <NetworkPanels serverId={id} online={s.status === "online" && s.connected} speedTestOff={!!info.noSpeedTest} />
+            {snap && <InterfacesCard ifaces={snap.ifaces ?? []} />}
+          </div>
 
           {snap && (
             <div className="grid gap-4 sm:gap-5 lg:grid-cols-2">
@@ -243,31 +263,6 @@ export function ServerDetailPage({ id }: { id: number }) {
               <ProcTable title="Top processes by CPU" procs={snap.topCpu ?? []} by="cpu" />
               <ProcTable title="Top processes by memory" procs={snap.topMem ?? []} by="mem" />
               <Card>
-                <CardTitle>Network interfaces</CardTitle>
-                <div className="-mx-1 overflow-x-auto">
-                  <table className="w-full min-w-[360px] text-sm">
-                    <thead>
-                      <tr className="text-left text-xs text-fg-3">
-                        <th className="px-1 pb-2 font-medium">Interface</th>
-                        <th className="px-1 pb-2 text-right font-medium">In</th>
-                        <th className="px-1 pb-2 text-right font-medium">Out</th>
-                        <th className="px-1 pb-2 text-right font-medium">Errors</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {(snap.ifaces ?? []).map((f) => (
-                        <tr key={f.name} className="border-t border-line">
-                          <td className="truncate px-1 py-2 font-mono text-[13px]">{f.name}</td>
-                          <td className="tnum px-1 py-2 text-right font-mono text-xs">{fmtRate(f.rx)}</td>
-                          <td className="tnum px-1 py-2 text-right font-mono text-xs">{fmtRate(f.tx)}</td>
-                          <td className={`tnum px-1 py-2 text-right font-mono text-xs ${f.rxErr + f.txErr + f.drops > 0 ? "text-warn" : "text-fg-3"}`}>{f.rxErr + f.txErr + f.drops}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </Card>
-              <Card>
                 <CardTitle>Alert history</CardTitle>
                 {events.length === 0 ? (
                   <p className="text-sm text-fg-2">No alerts yet.</p>
@@ -294,7 +289,8 @@ export function ServerDetailPage({ id }: { id: number }) {
                   </ul>
                 )}
               </Card>
-              {snap.docker && <ContainersCard docker={snap.docker} />}
+              <GPUCard gpu={snap.gpu} />
+              {snap.docker && <DockerCard docker={snap.docker} />}
               <ServicesCard units={snap.units ?? []} failed={snap.failedUnits ?? []} watched={s.thresholds.units ?? []} />
               {snap.temps && snap.temps.length > 0 && (
                 <Card>

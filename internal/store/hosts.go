@@ -21,10 +21,14 @@ type Thresholds struct {
 	Containers bool     `json:"containers"` // alert when a running container stops, restarts or turns unhealthy
 	Services   bool     `json:"services"`   // alert when a watched systemd unit isn't active
 	Units      []string `json:"units"`      // systemd units to watch, e.g. nginx.service
+
+	TrafficQuotaGB  float64 `json:"trafficQuotaGb"`  // monthly allowance in GB (in + out); 0 = none
+	TrafficResetDay int     `json:"trafficResetDay"` // day of the month the provider's counter resets (1–28)
+	SpeedTestHours  int     `json:"speedTestHours"`  // run a speed test this often; 0 = only when asked
 }
 
 func DefaultThresholds() Thresholds {
-	return Thresholds{CPU: 90, Mem: 90, Disk: 85, Minutes: 5, Offline: true, Containers: true, Services: true, Units: []string{}}
+	return Thresholds{CPU: 90, Mem: 90, Disk: 85, Minutes: 5, Offline: true, Containers: true, Services: true, Units: []string{}, TrafficResetDay: 1}
 }
 
 type Host struct {
@@ -231,26 +235,43 @@ func (s *Store) ApplyChannelToAllHosts(channelID int64) error {
 
 // metricCols matches proto.Metrics field order in metricVals.
 var metricCols = []string{"cpu", "iowait", "steal", "load1", "load5", "load15", "mem_used", "mem_total", "swap_used", "swap_total",
-	"disk_read", "disk_write", "net_rx", "net_tx", "tcp", "procs", "disk_pct"}
+	"disk_read", "disk_write", "net_rx", "net_tx", "tcp", "procs", "disk_pct", "gpu", "gpu_mem"}
 
 // maxCols also keep their peak in rollups.
-var maxCols = []string{"cpu", "mem_used", "load1", "disk_read", "disk_write", "net_rx", "net_tx"}
+var maxCols = []string{"cpu", "mem_used", "load1", "disk_read", "disk_write", "net_rx", "net_tx", "gpu"}
 
 func metricVals(m *proto.Metrics) []any {
 	return []any{m.CPU, m.IOWait, m.Steal, m.Load1, m.Load5, m.Load15, m.MemUsed, m.MemTotal, m.SwapUsed, m.SwapTotal,
-		m.DiskRead, m.DiskWrite, m.NetRx, m.NetTx, m.TCP, m.Procs, m.DiskPct}
+		m.DiskRead, m.DiskWrite, m.NetRx, m.NetTx, m.TCP, m.Procs, m.DiskPct, m.GPU, m.GPUMem}
 }
 
 func metricPtrs(m *proto.Metrics) []any {
 	return []any{&m.CPU, &m.IOWait, &m.Steal, &m.Load1, &m.Load5, &m.Load15, &m.MemUsed, &m.MemTotal, &m.SwapUsed, &m.SwapTotal,
-		&m.DiskRead, &m.DiskWrite, &m.NetRx, &m.NetTx, &m.TCP, &m.Procs, &m.DiskPct}
+		&m.DiskRead, &m.DiskWrite, &m.NetRx, &m.NetTx, &m.TCP, &m.Procs, &m.DiskPct, &m.GPU, &m.GPUMem}
 }
 
 var insertMetricSQL = `INSERT OR IGNORE INTO host_metrics(host_id, ts, ` + strings.Join(metricCols, ", ") + `) VALUES(?, ?` + strings.Repeat(", ?", len(metricCols)) + `)`
 
+// InsertMetrics stores a frame and adds its traffic to the day's total. A
+// replayed frame (same timestamp) is ignored, so traffic isn't counted twice.
 func (s *Store) InsertMetrics(hostID int64, m *proto.Metrics) error {
-	_, err := s.db.Exec(insertMetricSQL, append([]any{hostID, m.TS}, metricVals(m)...)...)
-	return err
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(insertMetricSQL, append([]any{hostID, m.TS}, metricVals(m)...)...)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 1 && (m.NetRxBytes > 0 || m.NetTxBytes > 0) {
+		if _, err := tx.Exec(`INSERT INTO host_traffic(host_id, day, rx, tx) VALUES(?,?,?,?)
+			ON CONFLICT(host_id, day) DO UPDATE SET rx = rx + excluded.rx, tx = tx + excluded.tx`,
+			hostID, m.TS/86_400_000*86_400_000, float64(m.NetRxBytes), float64(m.NetTxBytes)); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // rollupSQL aggregates `from` into `to` buckets of `bucket` ms. Raw rows
@@ -318,6 +339,7 @@ type MetricPoint struct {
 	DiskWriteMax *float64 `json:"diskWriteMax,omitempty"`
 	NetRxMax     *float64 `json:"netRxMax,omitempty"`
 	NetTxMax     *float64 `json:"netTxMax,omitempty"`
+	GPUMax       *float64 `json:"gpuMax,omitempty"`
 }
 
 // HostSeries reads points since sinceMs from "raw", "1m" or "1h".
@@ -343,9 +365,9 @@ func (s *Store) HostSeries(hostID, sinceMs int64, resolution string) ([]MetricPo
 		var p MetricPoint
 		dest := append([]any{&p.TS}, metricPtrs(&p.Metrics)...)
 		if rollup {
-			p.CPUMax, p.MemUsedMax, p.Load1Max, p.DiskReadMax, p.DiskWriteMax, p.NetRxMax, p.NetTxMax =
-				new(float64), new(float64), new(float64), new(float64), new(float64), new(float64), new(float64)
-			dest = append(dest, p.CPUMax, p.MemUsedMax, p.Load1Max, p.DiskReadMax, p.DiskWriteMax, p.NetRxMax, p.NetTxMax)
+			p.CPUMax, p.MemUsedMax, p.Load1Max, p.DiskReadMax, p.DiskWriteMax, p.NetRxMax, p.NetTxMax, p.GPUMax =
+				new(float64), new(float64), new(float64), new(float64), new(float64), new(float64), new(float64), new(float64)
+			dest = append(dest, p.CPUMax, p.MemUsedMax, p.Load1Max, p.DiskReadMax, p.DiskWriteMax, p.NetRxMax, p.NetTxMax, p.GPUMax)
 		}
 		if err := rows.Scan(dest...); err != nil {
 			return nil, err
@@ -383,6 +405,8 @@ func (s *Store) PruneHosts(rawBefore, minuteBefore, hourBefore int64) error {
 		{`DELETE FROM host_metrics WHERE ts < ?`, rawBefore},
 		{`DELETE FROM host_rollup_1m WHERE ts < ?`, minuteBefore},
 		{`DELETE FROM host_rollup_1h WHERE ts < ?`, hourBefore},
+		{`DELETE FROM host_traffic WHERE day < ?`, hourBefore},
+		{`DELETE FROM speed_tests WHERE ts < ?`, hourBefore},
 	} {
 		if _, err := s.db.Exec(q.sql, q.ts); err != nil {
 			return err

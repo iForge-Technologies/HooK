@@ -175,6 +175,8 @@ export interface HostInfo {
   memTotal: number;
   swapTotal: number;
   bootTime: number;
+  probes?: boolean;
+  noSpeedTest?: boolean;
 }
 
 export interface Metrics {
@@ -196,6 +198,8 @@ export interface Metrics {
   tcp: number;
   procs: number;
   diskPct: number;
+  gpu: number;
+  gpuMem: number;
 }
 
 /** Rollup points also carry the peak inside the bucket. */
@@ -207,6 +211,7 @@ export interface MetricPoint extends Metrics {
   diskWriteMax?: number;
   netRxMax?: number;
   netTxMax?: number;
+  gpuMax?: number;
 }
 
 export interface Thresholds {
@@ -218,6 +223,9 @@ export interface Thresholds {
   containers: boolean;
   services: boolean;
   units: string[];
+  trafficQuotaGb: number;
+  trafficResetDay: number;
+  speedTestHours: number;
 }
 
 export type ServerStatus = "new" | "online" | "offline";
@@ -246,14 +254,64 @@ export interface Snapshot {
   uptime: number;
   cores: number[] | null;
   mounts: { path: string; device: string; fstype: string; total: number; used: number; usedPct: number; inodesPct: number }[] | null;
-  ifaces: { name: string; rx: number; tx: number; rxErr: number; txErr: number; drops: number }[] | null;
+  ifaces: Iface[] | null;
   topCpu: Proc[] | null;
   topMem: Proc[] | null;
   temps: { sensor: string; c: number }[] | null;
   rebootRequired: boolean;
-  docker?: { available: boolean; error?: string; containers: Container[] | null };
+  docker?: Docker;
+  gpu?: GPUs;
   units: Unit[] | null;
   failedUnits: string[] | null;
+}
+
+export interface Iface {
+  name: string;
+  rx: number;
+  tx: number;
+  rxErr: number;
+  txErr: number;
+  drops: number;
+  /* newer agents */
+  rxTotal?: number;
+  txTotal?: number;
+  up?: boolean;
+  speed?: number; // Mbit/s, 0 = unknown
+  mtu?: number;
+  addrs?: string[];
+}
+
+export interface GPUs {
+  present: boolean;
+  note?: string;
+  devices: GPU[];
+  procs: { pid: number; name: string; gpu: number; mem: number }[] | null;
+}
+
+export interface GPU {
+  index: number;
+  vendor: "nvidia" | "amd" | "intel";
+  name: string;
+  util: number; // -1 = not reported
+  memUsed: number;
+  memTotal: number;
+  temp?: number;
+  power?: number;
+  powerLimit?: number;
+  fan?: number;
+  clockMhz?: number;
+  driver?: string;
+}
+
+export interface Docker {
+  available: boolean;
+  error?: string;
+  version?: string;
+  containers: Container[] | null;
+  images?: DockerImage[] | null;
+  volumes?: DockerVolume[] | null;
+  usage?: { at: number; images: number; containers: number; volumes: number; buildCache: number; reclaimable: number };
+  detailError?: string;
 }
 
 export interface Container {
@@ -267,6 +325,57 @@ export interface Container {
   cpu: number;
   mem: number;
   memLimit: number;
+  /* newer agents */
+  created?: number;
+  startedAt?: number;
+  ports?: string[];
+  networks?: string[];
+  mounts?: { type: string; name: string; target: string; rw: boolean }[];
+  netRx?: number;
+  netTx?: number;
+  blockRead?: number;
+  blockWrite?: number;
+  pids?: number;
+  sizeRw?: number;
+}
+
+export interface DockerImage {
+  id: string;
+  tags: string[];
+  size: number;
+  created: number;
+  containers: number;
+  dangling: boolean;
+}
+
+export interface DockerVolume {
+  name: string;
+  driver: string;
+  size: number;
+  created?: number;
+  usedBy: string[];
+  anonymous: boolean;
+}
+
+export interface SpeedTest {
+  id: number;
+  ts: number;
+  downBps: number;
+  upBps: number;
+  latencyMs: number;
+  jitterMs: number;
+  server: string;
+  bytes: number;
+  error?: string;
+  scheduled: boolean;
+}
+
+export interface ServerNetwork {
+  days: { day: number; rx: number; tx: number }[];
+  cycle: { start: number; end: number; rx: number; tx: number; quotaGb: number };
+  speedTests: SpeedTest[];
+  speedTestHours: number;
+  speedTestEnabled: boolean;
 }
 
 export interface Unit {
