@@ -101,19 +101,25 @@ export function OverlayProvider({ children }: { children: ReactNode }) {
 
 export function Modal({ open, onClose, title, children, width = "max-w-lg" }: { open: boolean; onClose: () => void; title: string; children: ReactNode; width?: string }) {
   const panel = useRef<HTMLDivElement>(null);
+  // Callers pass a new onClose on every render. Reading it through a ref keeps
+  // the effect below tied to opening and closing only; otherwise each
+  // keystroke in a field re-ran it and moved focus away from the field.
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
   useEffect(() => {
     if (!open) return;
     const prev = document.activeElement as HTMLElement | null;
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && closeRef.current();
     window.addEventListener("keydown", onKey);
-    panel.current?.querySelector<HTMLElement>("input, select, textarea, button")?.focus();
+    const p = panel.current;
+    (p?.querySelector<HTMLElement>("input, select, textarea") ?? p?.querySelector<HTMLElement>("button"))?.focus();
     document.body.style.overflow = "hidden";
     return () => {
       window.removeEventListener("keydown", onKey);
       document.body.style.overflow = "";
       prev?.focus();
     };
-  }, [open, onClose]);
+  }, [open]);
   if (!open) return null;
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 p-0 backdrop-blur-sm sm:items-center sm:p-6" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
