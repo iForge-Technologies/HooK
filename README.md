@@ -84,6 +84,6 @@ For HTTPS, systemd, backups and agent options, see [Installation](docs/INSTALLAT
 | [Security](docs/SECURITY.md) | Security model and the 2026 audit |
 | [Roadmap](PLAN.md) | How Hook was planned and built |
 
-## Origin
+## Credits
 
 **HooK** was created by [k4ran909](https://github.com/k4ran909).
