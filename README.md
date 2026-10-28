@@ -86,4 +86,4 @@ For HTTPS, systemd, backups and agent options, see [Installation](docs/INSTALLAT
 
 ## Origin
 
-**HooK** was created by [k4ran909](https://github.com/k4ran909). The original repository is [github.com/k4ran909/HooK](https://github.com/k4ran909/HooK.git).
+**HooK** was created by [k4ran909](https://github.com/k4ran909).
